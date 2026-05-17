@@ -372,6 +372,8 @@ docker compose -f compose.openwebui.yml down -v
 
 ## Куда читать дальше
 
+- **[`INSTALL.md`](INSTALL.md)** — полная установка от чистой ОС +
+  карта всех тумблеров «как включить / выключить любой кубик».
 - **[`SECURITY.md`](SECURITY.md)** — все 11 временных ключей, как их
   ротировать, чего НЕ делать с git.
 - [`docs/architecture.md`](docs/architecture.md) — общая архитектура,
