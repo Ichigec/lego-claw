@@ -16,10 +16,12 @@ LiteLLM, LocalAI, agent-адаптеры, tool-серверы, Phoenix-набл�
 - Хотите свой инструмент агенту — добавляете compose-файл, регистрируете
   в OpenWebUI через `scripts/openwebui-register-*.sh`.
 
-> Этот проект — **публичный snapshot без секретов**. Все API-ключи,
-> JWT-токены и приватные пути заменены placeholder'ами. Перед первым
-> запуском нужно (1) скопировать `.env*.example` → `.env*`, (2) сгенерировать
-> секреты, (3) запустить `bash stack-start.sh`. Подробности — ниже.
+> Этот проект — **публичный snapshot с временными dev-ключами**. Все
+> API-ключи, JWT-токены и приватные пути заменены на читаемые
+> `dev-temp-<service>-CHANGE-ME-IN-PRODUCTION-<суффикс>` значения, так что
+> репо поднимается одной командой и можно сразу пробовать. Перед любым
+> выставлением сервиса наружу (не на `127.0.0.1`) **обязательно**
+> ротируйте все 11 ключей — см. [`SECURITY.md`](SECURITY.md).
 
 ---
 
@@ -135,28 +137,26 @@ cp .env.runtime.example   .env.runtime
 cp .env.llamacpp.example  .env.llamacpp
 ```
 
-### 2. Сгенерировать секреты
+### 2. (Опционально) Ротировать временные ключи
 
-Все ключи в шаблонах — placeholder'ы вида
-`__GENERATE_WITH_openssl_rand_hex_32__`. Сгенерировать сразу все:
+В шаблонах сразу лежат **временные dev-ключи** вида
+`dev-temp-<service>-CHANGE-ME-IN-PRODUCTION-<суффикс>`. Стек заведётся
+с ними как есть, и для локального запуска на `127.0.0.1` этого хватает.
+
+**Перед** выставлением любого сервиса наружу (не на `127.0.0.1`) —
+ротируйте все 11 ключей одной командой из [`SECURITY.md`](SECURITY.md):
 
 ```bash
-# .env — adapter-ключи + agent-registry/skills-manager
 for k in CLAWCODE_ADAPTER_API_KEY OPENHANDS_ADAPTER_API_KEY \
          OPENCODE_ADAPTER_API_KEY AGENT_REGISTRY_API_KEY \
          SKILLS_MANAGER_API_KEY; do
   sed -i "s|^$k=.*|$k=$(openssl rand -hex 32)|" .env
 done
-
-# .env.openwebui — секреты UI + tool-серверов + host-jupyter
 for k in WEBUI_SECRET_KEY SEARXNG_SECRET JUPYTER_TOKEN \
          SHELLBOX_API_KEY FSBOX_API_KEY SEARCHBOX_API_KEY; do
   sed -i "s|^$k=.*|$k=$(openssl rand -hex 32)|" .env.openwebui
 done
 ```
-
-(При желании повторить для остальных `.env.*`, если они у вас содержат
-секреты — но обычно в этих файлах только пути и порты.)
 
 При первом входе в OpenWebUI назначьте админа через web-форму или
 заранее задайте `OPENWEBUI_ADMIN_EMAIL` / `OPENWEBUI_ADMIN_PASSWORD`
@@ -236,30 +236,25 @@ bash opencode-demo-ru.sh                # opencode: ACP-канал + version-che
 
 ---
 
-## Безопасность: что обязательно заполнить перед запуском
+## Безопасность
 
-В этом snapshot'е удалены **все** реальные секреты — на их месте стоят
-placeholder'ы `__GENERATE_WITH_openssl_rand_hex_32__`. Перед первым
-запуском заполните своими значениями:
+**В этом snapshot'е удалены все реальные секреты** и заменены на
+читаемые временные значения вида
+`dev-temp-<service>-CHANGE-ME-IN-PRODUCTION-<суффикс>`.
 
-| Секрет | Файл | Сгенерировать заново |
-| --- | --- | --- |
-| `CLAWCODE_ADAPTER_API_KEY` | [`.env`](.env) | `openssl rand -hex 32` |
-| `OPENHANDS_ADAPTER_API_KEY` | [`.env`](.env) | `openssl rand -hex 32` |
-| `OPENCODE_ADAPTER_API_KEY` | [`.env`](.env) | `openssl rand -hex 32` |
-| `AGENT_REGISTRY_API_KEY` | [`.env`](.env) | `openssl rand -hex 32` |
-| `SKILLS_MANAGER_API_KEY` | [`.env`](.env) | `openssl rand -hex 32` |
-| `WEBUI_SECRET_KEY` | [`.env.openwebui`](.env.openwebui) | `openssl rand -hex 32` |
-| `SEARXNG_SECRET` | [`.env.openwebui`](.env.openwebui) | `openssl rand -hex 32` |
-| `JUPYTER_TOKEN` | [`.env.openwebui`](.env.openwebui) | `openssl rand -hex 32` |
-| `SHELLBOX_API_KEY` | [`.env.openwebui`](.env.openwebui) | `openssl rand -hex 32` |
-| `FSBOX_API_KEY` | [`.env.openwebui`](.env.openwebui) | `openssl rand -hex 32` |
-| `SEARCHBOX_API_KEY` | [`.env.openwebui`](.env.openwebui) | `openssl rand -hex 32` |
-| `OPENWEBUI_ADMIN_EMAIL`, `OPENWEBUI_ADMIN_PASSWORD` | [`.env.openwebui`](.env.openwebui) | поставьте свои |
+Полный список 11 временных ключей, что каждый защищает, и команды
+ротации — в **[`SECURITY.md`](SECURITY.md)**. Краткий чек-лист:
+
+- **Для локального запуска на `127.0.0.1`** — временные ключи OK,
+  можно ничего не менять.
+- **Перед выставлением наружу** — ротация всех 11 одной командой
+  (см. [`SECURITY.md` → Ротация](SECURITY.md#ротация-одной-командой)).
+- **Перед каждым `git push`** — запустить `bash scripts/audit-clean.sh`
+  (он проверяет, что в `.env*.example` нет настоящих hex-секретов,
+  что нет персональных путей, email'ов и т.д.).
 
 Что **уже** почищено в этом snapshot'е:
 
-- Все hex-секреты в `.env*` заменены placeholder'ами (см. таблицу выше).
 - Все персональные пути (`/home/<user>/...`) заменены на `${HOME}/...`
   или `~/...` в коде, compose'ах, скриптах и документации.
 - Runtime-каталоги (`data/backups/`, `data/diagnostics/`, `data/debug/`,
@@ -377,6 +372,8 @@ docker compose -f compose.openwebui.yml down -v
 
 ## Куда читать дальше
 
+- **[`SECURITY.md`](SECURITY.md)** — все 11 временных ключей, как их
+  ротировать, чего НЕ делать с git.
 - [`docs/architecture.md`](docs/architecture.md) — общая архитектура,
   Mermaid-диаграммы, что было удалено в фазах уборки.
 - [`docs/agent-mesh.md`](docs/agent-mesh.md) — agent-mesh (Claw + OpenHands

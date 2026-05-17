@@ -139,8 +139,8 @@ check "no removed directories present" "$(printf '%b' "$found")"
 
 # ── 6. .env* файлы не трекаются git'ом (только .env*.example) ───────────────
 echo "6. .env* (без .example) не должны быть в git:"
-found="$(git ls-files | grep -E '^\.env(\.[a-z]+)?$' | head -10)"
-check "no .env* files tracked by git" "$found"
+found="$(git ls-files | grep -E '^\.env(\.[a-z]+)?$' | grep -v '\.example$' | head -10)"
+check "no .env* (non-example) files tracked by git" "$found"
 
 # ── 7. PNG/WAV/MP3 в корне репо ─────────────────────────────────────────────
 echo "7. Бинарные артефакты в корне репо (не в моделях):"
