@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+VENV_PYTHON="$ROOT_DIR/.venv-sherpa/bin/python"
+BRIDGE_SCRIPT="$ROOT_DIR/scripts/sherpa_lmstudio_bridge.py"
+
+if [ ! -x "$VENV_PYTHON" ]; then
+  echo "Python interpreter not found: $VENV_PYTHON" >&2
+  exit 1
+fi
+
+exec "$VENV_PYTHON" "$BRIDGE_SCRIPT" "$@"

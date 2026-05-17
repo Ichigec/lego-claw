@@ -1,0 +1,10 @@
+{
+  "_comment": "Snippet for OpenHands Settings → MCP → Add Server. Paste the `searchbox` object into your OpenHands MCP config (UI: Settings → MCP → Add Server). The URL resolves via llm-stack-net DNS from the OpenHands app container; for runtime sandboxes use http://host.docker.internal:8024/sse instead (see docs/openhands.md → Локальный MCP-search).",
+  "mcpServers": {
+    "searchbox": {
+      "type": "sse",
+      "url": "http://searchbox:8090/sse",
+      "description": "Multi-engine search: SearXNG, Wikipedia/Wikidata, arXiv, GitHub, Hacker News, StackExchange, Crossref/OpenAlex, PyPI/NPM, DuckDuckGo. Default tool `search` fans out in parallel and returns a deduplicated round-robin merge."
+    }
+  }
+}

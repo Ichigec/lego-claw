@@ -1,0 +1,51 @@
+services:
+  shellbox:
+    build:
+      context: ./docker/shellbox
+      dockerfile: Dockerfile
+    image: openwebui-shellbox:local
+    container_name: shellbox
+    restart: unless-stopped
+    user: "10001:10001"
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - "no-new-privileges:true"
+    pids_limit: 64
+    mem_limit: 256m
+    memswap_limit: 256m
+    cpus: 1.0
+    tmpfs:
+      - /tmp:size=64m,exec
+      - /home/runner:size=8m,exec
+    environment:
+      - SHELLBOX_PORT=8001
+      - MCPO_API_KEY=${SHELLBOX_API_KEY:?SHELLBOX_API_KEY must be set in .env.openwebui}
+      # Read-only / observation-only commands. mcp-shell-server uses ALLOW_COMMANDS
+      # as a hard whitelist; anything else is rejected before exec.
+      - ALLOW_COMMANDS=ls,cat,head,tail,rg,grep,jq,find,stat,du,df,wc,awk,sed,file,sort,uniq,echo,which,pwd,tr,cut,tee,less,date,env
+    volumes:
+      # Read-only mount корня репо (по умолчанию — текущий рабочий каталог).
+      # Переопределите через SHELLBOX_WORKSPACE_DIR, если запускаете compose
+      # из другого места.
+      - ${SHELLBOX_WORKSPACE_DIR:-${PWD}}:/workspace:ro
+    ports:
+      # Bound to loopback only — OpenWebUI talks via the docker network DNS name `shellbox`.
+      - "127.0.0.1:${SHELLBOX_HOST_PORT:-8001}:8001"
+    healthcheck:
+      # Double-dollar prevents compose host-shell substitution; the literal
+      # `$MCPO_API_KEY` is then expanded inside the container at runtime.
+      test:
+        - CMD-SHELL
+        - 'curl -fsS -m 3 -H "Authorization: Bearer $$MCPO_API_KEY" http://127.0.0.1:8001/openapi.json >/dev/null'
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    networks: [llm-net]
+
+networks:
+  llm-net:
+    external: true
+    name: llm-stack-net

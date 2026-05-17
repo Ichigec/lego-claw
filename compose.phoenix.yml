@@ -1,0 +1,141 @@
+services:
+  phoenix-db:
+    image: postgres:16-alpine
+    container_name: phoenix-db
+    restart: unless-stopped
+    environment:
+      - POSTGRES_USER=phoenix
+      - POSTGRES_PASSWORD=phoenix
+      - POSTGRES_DB=phoenix
+    volumes:
+      - phoenix_pg:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U phoenix -d phoenix"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    networks: [llm-net]
+
+  phoenix:
+    image: arizephoenix/phoenix:latest
+    container_name: phoenix
+    restart: unless-stopped
+    depends_on:
+      phoenix-db:
+        condition: service_healthy
+    environment:
+      - PHOENIX_SQL_DATABASE_URL=postgresql://phoenix:phoenix@phoenix-db:5432/phoenix
+      - PHOENIX_WORKING_DIR=/mnt/data
+      - PHOENIX_PORT=6006
+      - PHOENIX_GRPC_PORT=4317
+      - PHOENIX_ENABLE_PROMETHEUS=true
+    volumes:
+      - phoenix_data:/mnt/data
+    ports:
+      # UI + OTLP/HTTP (Phoenix слушает HTTP OTLP прямо на 6006; дополнительный HTTP-mapping
+      # 4318->6006 даёт клиентам «классический» порт 4318)
+      - "6006:6006"
+      - "4317:4317"   # OTLP/gRPC
+      - "4318:6006"   # OTLP/HTTP alias
+    networks: [llm-net]
+
+  litellm-db:
+    image: postgres:16-alpine
+    container_name: litellm-db
+    restart: unless-stopped
+    environment:
+      - POSTGRES_USER=${LITELLM_DB_USER:-litellm}
+      - POSTGRES_PASSWORD=${LITELLM_DB_PASSWORD:-litellm}
+      - POSTGRES_DB=${LITELLM_DB_NAME:-litellm}
+    volumes:
+      - litellm_pg:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${LITELLM_DB_USER:-litellm} -d ${LITELLM_DB_NAME:-litellm}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    networks: [llm-net]
+
+  litellm:
+    image: ghcr.io/berriai/litellm-database:v1.83.7-stable
+    container_name: litellm
+    restart: unless-stopped
+    depends_on:
+      phoenix:
+        condition: service_started
+      litellm-db:
+        condition: service_healthy
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - ./docker/litellm/config.yaml:/app/config.yaml:ro
+    command: ["--config", "/app/config.yaml", "--port", "4000", "--host", "0.0.0.0"]
+    environment:
+      - LITELLM_LOG=INFO
+      - LITELLM_MASTER_KEY=${LITELLM_API_KEY:-sk-local}
+      - DATABASE_URL=postgresql://${LITELLM_DB_USER:-litellm}:${LITELLM_DB_PASSWORD:-litellm}@litellm-db:5432/${LITELLM_DB_NAME:-litellm}
+      - STORE_MODEL_IN_DB=${LITELLM_STORE_MODEL_IN_DB:-True}
+      - UI_USERNAME=${LITELLM_UI_USERNAME:-admin}
+      - UI_PASSWORD=${LITELLM_UI_PASSWORD:-litellm-local-ui}
+      - LMSTUDIO_API_BASE=${LMSTUDIO_API_BASE:-http://host.docker.internal:1234/v1}
+      - LMSTUDIO_API_KEY=${LMSTUDIO_API_KEY:-lm-studio}
+      # Optional: host-side llama-server (bash llamacpp-host-start.sh). Default
+      # :8090 — only needed if docker/litellm/config.yaml routes a model_name
+      # through LLAMA_CPP_*; the qwen3.6-35b-heretic aliases use LM Studio above.
+      - LLAMA_CPP_API_BASE=${LLAMA_CPP_API_BASE:-http://host.docker.internal:8090/v1}
+      - LLAMA_CPP_API_KEY=${LLAMA_CPP_API_KEY:-llama-cpp}
+      - LOCALAI_API_BASE=${LOCALAI_API_BASE:-http://localai:8080/v1}
+      - LOCALAI_API_KEY=${LOCALAI_API_KEY:-localai}
+      # vLLM exposed on the host (см. docker/litellm/config.yaml → gemma-4-26B-lowmem)
+      - VLLM_API_BASE=${VLLM_API_BASE:-http://host.docker.internal:8000/v1}
+      - VLLM_API_KEY=${VLLM_API_KEY:-sk-vllm}
+      # Optional upstreams for additional LiteLLM aliases in docker/litellm/config.yaml.
+      - REMOTE_OPENAI_API_BASE=${REMOTE_OPENAI_API_BASE:-}
+      - REMOTE_OPENAI_API_KEY=${REMOTE_OPENAI_API_KEY:-}
+      - OLLAMA_API_BASE=${OLLAMA_API_BASE:-}
+      # callback читает эти переменные; дублируем на случай, если config.yaml environment_variables
+      # не прокидывается в рантайм
+      - PHOENIX_COLLECTOR_ENDPOINT=http://phoenix:6006
+      - PHOENIX_PROJECT_NAME=qwen3.6-heretic
+    ports:
+      - "${LITELLM_HOST_PORT:-4000}:4000"
+    networks: [llm-net]
+
+  # Optional pattern-B OpenAI hop (template for future orchestrators). See docs/litellm-clients.md.
+  openai-stack-relay:
+    build:
+      context: ./docker/openai-stack-relay
+    image: voice-assistant-openai-stack-relay:local
+    container_name: openai-stack-relay
+    restart: unless-stopped
+    depends_on:
+      litellm:
+        condition: service_started
+    environment:
+      - UPSTREAM_BASE=http://litellm:4000/v1
+      - UPSTREAM_API_KEY=${LITELLM_API_KEY:-sk-local}
+      - UPSTREAM_MODEL=qwen3.6-35b-heretic
+      - LISTEN_PORT=8088
+    networks: [llm-net]
+
+  # Note: the old `clawcode-litellm-adapter` placeholder service AND the
+  # `clawcode-cli-routing-stub` LiteLLM alias were both removed. They are now
+  # replaced by the real agent-mesh adapters defined in compose.agents-mesh.yml
+  # (clawcode-adapter at :8790 loopback, openhands-adapter at :8791 loopback)
+  # and their corresponding LiteLLM aliases `agent/clawcode` / `agent/openhands`.
+  # See docs/agent-mesh.md.
+
+volumes:
+  phoenix_pg:
+    name: phoenix-pg-volume
+  phoenix_data:
+    name: phoenix-data-volume
+  litellm_pg:
+    name: litellm-pg-volume
+
+networks:
+  llm-net:
+    external: true
+    name: llm-stack-net

@@ -1,0 +1,15 @@
+[build-system]
+requires      = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name            = "minimal-acp-agent"
+version         = "0.1.0"
+description     = "Minimal ACP-compliant agent (stdio JSON-RPC, asyncio, stdlib only)"
+readme          = "README.md"
+requires-python = ">=3.10"
+license         = { text = "MIT" }
+dependencies    = []
+
+[project.scripts]
+minimal-acp-agent = "acp_agent:main"

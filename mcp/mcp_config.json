@@ -1,0 +1,18 @@
+{
+  "_comment": "Stdio MCP config snippet for Cursor / Claude Desktop / other clients that launch MCP servers as local subprocesses. Замените '${REPO_ROOT}' на абсолютный путь к этому репозиторию (например, '${HOME}/lego-claw'). Для запущенного HTTP endpoint'а (Docker-контейнер) см. compose.searchbox.yml + docs/openwebui-tools.md. Для OpenHands см. mcp/openhands_mcp.json.",
+  "mcpServers": {
+    "searchbox": {
+      "command": "python3",
+      "args": ["${REPO_ROOT}/mcp/server.py", "--transport", "stdio"],
+      "env": {
+        "SEARXNG_URL": "http://localhost:8081",
+        "BRAVE_API_KEY": "",
+        "GOOGLE_API_KEY": "",
+        "GOOGLE_CX": "",
+        "GITHUB_TOKEN": "",
+        "TAVILY_API_KEY": "",
+        "STACKEXCHANGE_KEY": ""
+      }
+    }
+  }
+}

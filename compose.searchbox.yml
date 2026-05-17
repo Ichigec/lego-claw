@@ -1,0 +1,64 @@
+services:
+  searchbox:
+    build:
+      # Build context = repo root so we can COPY mcp/** and docker/searchbox/**
+      # in a single image. Mirrors the fsbox / shellbox pattern, just with a
+      # wider scope (searchbox needs the whole `mcp/` subtree at build time).
+      context: .
+      dockerfile: ./docker/searchbox/Dockerfile
+    image: openwebui-searchbox:local
+    container_name: searchbox
+    restart: unless-stopped
+    user: "10002:10002"
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - "no-new-privileges:true"
+    pids_limit: 64
+    mem_limit: 256m
+    memswap_limit: 256m
+    cpus: 1.0
+    tmpfs:
+      - /tmp:size=64m,exec
+      - /home/searcher:size=8m,exec
+    environment:
+      - SEARCHBOX_MCPO_PORT=8001
+      - SEARCHBOX_HTTP_PORT=8090
+      - MCPO_API_KEY=${SEARCHBOX_API_KEY:?SEARCHBOX_API_KEY must be set in .env.openwebui}
+      # ── Primary backend: the local SearXNG container on llm-stack-net.
+      - SEARXNG_URL=${SEARCHBOX_SEARXNG_URL:-http://searxng:8080}
+      # ── Optional per-engine credentials. Unset vars → engine reports
+      #    "unavailable" in search_status / list_engines but does not crash.
+      - BRAVE_API_KEY=${BRAVE_API_KEY:-}
+      - GOOGLE_API_KEY=${GOOGLE_API_KEY:-}
+      - GOOGLE_CX=${GOOGLE_CX:-}
+      - GITHUB_TOKEN=${GITHUB_TOKEN:-}
+      - TAVILY_API_KEY=${TAVILY_API_KEY:-}
+      - STACKEXCHANGE_KEY=${STACKEXCHANGE_KEY:-}
+      - OPENALEX_MAILTO=${OPENALEX_MAILTO:-}
+      # ── Runtime tuning (exposed for ops; defaults in engines/base.py).
+      - SEARCHBOX_HTTP_TIMEOUT=${SEARCHBOX_HTTP_TIMEOUT:-10}
+      - SEARCHBOX_LOG_LEVEL=${SEARCHBOX_LOG_LEVEL:-INFO}
+    ports:
+      # Loopback only — other services on llm-stack-net use the DNS name
+      # `searchbox` (either :8001 for OpenAPI or :8090 for native MCP).
+      - "127.0.0.1:${SEARCHBOX_HOST_PORT:-8023}:8001"
+      - "127.0.0.1:${SEARCHBOX_MCP_HOST_PORT:-8024}:8090"
+    healthcheck:
+      # mcpo serves OpenAPI on :8001 with the same bearer token we inject
+      # as MCPO_API_KEY. Double-dollar escapes compose substitution so the
+      # literal `$MCPO_API_KEY` is expanded inside the container.
+      test:
+        - CMD-SHELL
+        - 'curl -fsS -m 3 -H "Authorization: Bearer $$MCPO_API_KEY" http://127.0.0.1:8001/openapi.json >/dev/null'
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    networks: [llm-net]
+
+networks:
+  llm-net:
+    external: true
+    name: llm-stack-net

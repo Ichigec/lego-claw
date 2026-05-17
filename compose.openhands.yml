@@ -1,0 +1,139 @@
+services:
+  openhands:
+    # OpenHands GUI server. Canonical image from
+    # https://docs.all-hands.dev/usage/local-setup
+    # OPENHANDS_IMAGE can be overridden in .env.openhands (e.g. to pin a
+    # specific patch version or fall back to a different arch tag).
+    image: ${OPENHANDS_IMAGE:-docker.openhands.dev/openhands/openhands:1.6}
+    container_name: openhands
+    restart: unless-stopped
+    pull_policy: missing
+    ports:
+      # 3000 inside the container is taken by OpenWebUI on the host, so we
+      # publish OpenHands on 3300 by default. Override via OPENHANDS_HOST_PORT.
+      - "${OPENHANDS_HOST_PORT:-3300}:3000"
+    environment:
+      # ── Diagnostics ───────────────────────────────────────────────────────
+      - LOG_ALL_EVENTS=${OPENHANDS_LOG_ALL_EVENTS:-true}
+      # ── Hostname/port OpenHands advertises to its own sandboxes ───────────
+      # The runtime sandbox (agent-server) talks back to the app over
+      # host.docker.internal:<SANDBOX_HOST_PORT> for MCP (/mcp/mcp) and
+      # webhooks (/api/v1/webhooks). Default is 3000, but in our stack
+      # OpenWebUI owns :3000 on the host — OpenHands is published on :3300.
+      # Without this, user messages fail with "405 Method Not Allowed" from
+      # OpenWebUI and the UI appears to silently drop the prompt.
+      #
+      # NOTE: the env var the code actually reads is `SANDBOX_HOST_PORT`
+      # (see openhands/app_server/config.py — `os.getenv('SANDBOX_HOST_PORT')`).
+      # The `OH_SANDBOX_HOST_PORT` name mentioned in the Field docstring is a
+      # nested-Settings path that is NOT honoured on this code path.
+      - SANDBOX_HOST_PORT=${OPENHANDS_HOST_PORT:-3300}
+      # ── Runtime sandbox image (V1 agent-server) ───────────────────────────
+      # Pinned to the version that matches the app image per official quickstart;
+      # avoids «exec format error» mismatches between app and runtime.
+      - AGENT_SERVER_IMAGE_REPOSITORY=${OPENHANDS_AGENT_SERVER_REPO:-ghcr.io/openhands/agent-server}
+      - AGENT_SERVER_IMAGE_TAG=${OPENHANDS_AGENT_SERVER_TAG:-1.15.0-python}
+      # ── LLM via shared LiteLLM gateway ────────────────────────────────────
+      # We route through LiteLLM on the host at :4000 using the
+      # `host.docker.internal` gateway — NOT the compose-network DNS name.
+      #
+      # Why host.docker.internal and not http://litellm:4000 ?
+      #   The OpenHands app container spawns agent-server sandboxes via
+      #   docker.sock. Those sandboxes join the default bridge network, not
+      #   our `llm-stack-net`, so the compose DNS `litellm` does not resolve
+      #   inside them — any LLM call fails with "OpenAIException - Connection
+      #   error." The app container adds extra_hosts for host.docker.internal,
+      #   and so do the spawned sandboxes (see docker_sandbox_service.py), so
+      #   this address works from both sides.
+      #
+      # Why the `openai/` prefix and not `litellm_proxy/` ?
+      #   The LiteLLM client bundled with OpenHands 1.6 forwards the
+      #   `litellm_proxy/` prefix verbatim to the proxy, which then rejects
+      #   it with HTTP 400 "Invalid model name". Using the `openai/` prefix
+      #   lets the client talk to our LiteLLM as a plain OpenAI-compatible
+      #   backend — LiteLLM then dispatches to whatever upstream is wired to
+      #   the alias in docker/litellm/config.yaml.
+      - LLM_BASE_URL=${OPENHANDS_LITELLM_BASE_URL:-http://host.docker.internal:4000/v1}
+      - LLM_API_KEY=${OPENHANDS_LITELLM_API_KEY:-${LITELLM_API_KEY:-sk-local}}
+      - LLM_MODEL=openai/${OPENHANDS_DEFAULT_MODEL:-qwen3.6-35b-heretic}
+      # ── Workspace bind-mount FOR THE RUNTIME SANDBOX ──────────────────────
+      # OpenHands v1 splits into two containers: this `openhands` app
+      # (FastAPI/UI, no agent tool exec) and a runtime sandbox spawned per
+      # conversation via docker.sock. Bind-mounts on this app container are
+      # NOT inherited by spawned runtime sandboxes — by default the runtime
+      # works in an ephemeral docker volume `openhands-workspace-<id>` that
+      # disappears when the conversation is deleted.
+      #
+      # `SANDBOX_VOLUMES` is the env this container reads (see
+      # openhands/app_server/config.py — parses host:container[:mode] csv
+      # and passes the result to DockerSandboxServiceInjector(mounts=…), which
+      # translates it into real bind-mounts on every spawned runtime).
+      #
+      # We mount the host workspace at `/workspace/project` (NOT `/workspace`)
+      # because:
+      #   1) `working_dir='/workspace/project'` is hard-coded in
+      #      openhands/app_server/sandbox/docker_sandbox_spec_service.py:50
+      #      and there is no env override.
+      #   2) The agent-server is a PyInstaller-frozen binary; on import,
+      #      `litellm` calls `dotenv.find_dotenv()` which uses `os.getcwd()`.
+      #      If `/workspace/project` does not exist as the container starts,
+      #      cwd resolution raises `OSError: Starting path not found` and the
+      #      whole runtime exits before the agent server can even bind a port.
+      #   3) Mounting at `/workspace/project` makes Docker auto-create the
+      #      mount-point parent (`/workspace`), so the agent-server's other
+      #      runtime dirs — `OH_CONVERSATIONS_PATH=/workspace/conversations`
+      #      and `OH_BASH_EVENTS_DIR=/workspace/bash_events` — happily land
+      #      inside the image's ephemeral FS (they are runtime metadata; the
+      #      durable chat history lives in ~/.openhands/openhands.db on the
+      #      app side).
+      - SANDBOX_VOLUMES=${OPENHANDS_WORKSPACE_DIR:-${HOME}/agent_dev}:/workspace/project:rw
+      # Legacy v0 hint; under v1 the actual cwd is dictated by
+      # docker_sandbox_spec_service.py and points to /workspace/project. Kept
+      # for back-compat and to make the value explicit when grepping.
+      - WORKSPACE_BASE=/workspace/project
+      # ── Agent-mesh: see Claw Code as an MCP tool ─────────────────────────
+      # The runtime-sandbox (default bridge net) reaches the adapter via
+      # `host.docker.internal:<loopback>` — same trick as searchbox in
+      # docs/openhands.md "OpenHands → локальный MCP-Search". Cycle guard:
+      # OpenHands MUST NOT see its own openhands-adapter — recursive
+      # delegation is blocked at the X-Agent-Mesh-Depth header on the
+      # adapter side but excluding it here avoids even attempting it.
+      #
+      # OPENHANDS_MCP_SERVERS is empty by default; set it in .env.openhands
+      # once CLAWCODE_ADAPTER_API_KEY is provisioned in .env.
+      - MCP_SERVERS=${OPENHANDS_MCP_SERVERS:-[]}
+    volumes:
+      # docker.sock so OpenHands can spawn the runtime sandbox container.
+      - /var/run/docker.sock:/var/run/docker.sock
+      # Persistent app state (sessions, settings).
+      # The fallback is an absolute path on purpose: compose does NOT recursively
+      # expand nested ${HOME} inside already-substituted values, and our env
+      # parser stores values verbatim. Launchers set OPENHANDS_STATE_DIR explicitly.
+      - ${OPENHANDS_STATE_DIR:-${HOME}/.openhands}:/.openhands
+      # Same workspace bind into the app container at the same path the agent
+      # uses, purely for human convenience: `docker exec openhands ls
+      # /workspace/project` matches what the agent sees inside its sandbox.
+      - ${OPENHANDS_WORKSPACE_DIR:-${HOME}/agent_dev}:/workspace/project
+      # Shared `.ai/` skills tree, mounted at the same path as in
+      # compose.clawcode.yml / compose.agents-mesh.yml. Read-only — only the
+      # `skills-manager` service writes to it.
+      - ${OPENHANDS_SKILLS_DIR:-./.ai}:/workspace/project/.ai:ro
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    healthcheck:
+      # OpenHands serves the GUI on :3000 inside the container. The root path
+      # returns 200 once the FastAPI backend is up.
+      test:
+        - CMD-SHELL
+        - 'curl -fsS -m 5 http://127.0.0.1:3000/ >/dev/null || exit 1'
+      interval: 30s
+      timeout: 10s
+      retries: 10
+      start_period: 60s
+    networks:
+      - llm-net
+
+networks:
+  llm-net:
+    external: true
+    name: llm-stack-net

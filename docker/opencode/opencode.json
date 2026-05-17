@@ -1,0 +1,26 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "provider": {
+    "litellm": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "LiteLLM (local gateway)",
+      "options": {
+        "baseURL": "http://litellm:4000/v1",
+        "apiKey": "{env:LITELLM_API_KEY}"
+      },
+      "models": {
+        "qwen3.6-35b-heretic": {
+          "name": "Qwen 3.6 35B (LiteLLM)"
+        },
+        "openai/qwen3.6-35b-heretic": {
+          "name": "Qwen 3.6 35B (provider/model)"
+        }
+      }
+    }
+  },
+  "model": "litellm/qwen3.6-35b-heretic",
+  "small_model": "litellm/qwen3.6-35b-heretic",
+  "autoshare": false,
+  "autoupdate": false,
+  "share": "disabled"
+}

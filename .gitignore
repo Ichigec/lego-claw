@@ -1,0 +1,95 @@
+# ── Python ──────────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+*.egg
+.eggs/
+
+# ── Virtual environments ─────────────────────────────────────────────────────
+.venv/
+.venv-*/
+.venv_*/
+venv/
+env/
+
+# ── Env / secrets (all *.env and *.env.* files) ─────────────────────────────
+.env
+.env.*
+**/.env
+**/.env.*
+# Allow committing examples / templates if you ever add them.
+!.env.example
+!.env.*.example
+
+# ── Secrets / configs ────────────────────────────────────────────────────────
+configs/.env
+configs/*.env
+configs/prompts/
+data/
+
+# ── IDE ──────────────────────────────────────────────────────────────────────
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# ── Logs ────────────────────────────────────────────────────────────────────
+logs/
+*.log
+
+# ── Test / coverage ──────────────────────────────────────────────────────────
+.pytest_cache/
+.coverage
+htmlcov/
+.mypy_cache/
+.ruff_cache/
+
+# ── Docker ───────────────────────────────────────────────────────────────────
+nginx/logs/
+
+# ── OpenWebUI tools integration ──────────────────────────────────────────────
+.venv-jupyter/
+.venv-sherpa/
+data/jupyter/jupyter.pid
+data/jupyter/jupyter.log
+data/searxng/
+docker/searxng/uwsgi.ini
+docker/searxng/settings.yml.bak
+
+# ── OpenHands ────────────────────────────────────────────────────────────────
+# Vendored upstream sources (clone of All-Hands-AI/OpenHands @ 1.6.0).
+openhands/
+# Future runtime artefacts under data/ (state lives in $HOME/.openhands).
+data/openhands/
+
+# ── Claw Code ────────────────────────────────────────────────────────────────
+# Image is built locally from docker/clawcode/Dockerfile (no vendored
+# sources in the repo). State lives in $HOME/.clawcode.
+data/clawcode/
+
+# ── Vendored upstream / cross-build artefacts (see docs/architecture.md) ────
+dify/
+.local/
+diagnostics/phase-a/*.log
+
+# ── LibreChat: removed from this snapshot (kept here for safety if you re-add it) ──
+librechat/
+
+# ── LLM weights (download separately, see docs/llama-cpp-host.md) ───────────
+models/
+
+# ── Snapshot for distribution (built by `rsync ... final/`) ─────────────────
+# Re-generate with the rsync command in final_description/README.md.
+final/
+
+# ── Cursor agent local state ────────────────────────────────────────────────
+.cursor/
+
+# ── Misc OS junk ────────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db

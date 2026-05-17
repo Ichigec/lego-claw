@@ -1,0 +1,45 @@
+services:
+  llama-server:
+    build:
+      context: ./docker/llamacpp
+      args:
+        CUDA_ARCH: ${LLAMA_CUDA_ARCH:-121}
+    image: llama-cpp-server:cuda13-arm64-sm121
+    container_name: llama-server
+    restart: unless-stopped
+    runtime: nvidia
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+    volumes:
+      - ${LMSTUDIO_MODELS_DIR:-${HOME}/.lmstudio/models}:/models:ro
+    ports:
+      - "${LLAMA_HOST_PORT:-8090}:8080"
+    # Параметры 1:1 с instructions/qwen3.6-35b-heretic.yaml (context_size=262144, batch=2048,
+    # gpu_layers=999, parallel=4, cont_batching, mmproj). Если --flash-attn упадёт на Blackwell,
+    # убрать флаг (см. «Риски» в плане).
+    command: >
+      --model /models/CCSSNE/tvall43-Qwen3.6-35B-A3B-heretic-gguf/Qwen3.6-35B-A3B-heretic-bf16.gguf
+      --mmproj /models/CCSSNE/tvall43-Qwen3.6-35B-A3B-heretic-gguf/Qwen3.6-35B-A3B-heretic-mmproj-F32.gguf
+      --host 0.0.0.0 --port 8080
+      --n-gpu-layers 999 --ctx-size 262144 --batch-size 2048
+      --parallel 4 --cont-batching --flash-attn
+      --alias qwen3.6-35b-heretic
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 180s
+    networks: [llm-net]
+
+networks:
+  llm-net:
+    external: true
+    name: llm-stack-net

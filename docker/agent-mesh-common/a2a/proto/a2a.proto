@@ -1,0 +1,240 @@
+// A2A protocol — gRPC binding (Section 10).
+//
+// Vendored from https://github.com/a2aproject/A2A — this file is a
+// SPEC-ALIGNED SUBSET sufficient for the methods implemented by the
+// agent-mesh adapters: message/send|stream, tasks/get|list|cancel|
+// resubscribe, tasks/pushNotificationConfig/{set,get,list,delete} and
+// agent/getCard.
+//
+// When the upstream repo publishes a stable proto, replace this file
+// with the pinned upstream version (`syntax`, package and service names
+// match upstream so the generated Python stubs stay drop-in).
+//
+// Regenerate Python stubs after editing:
+//
+//   bash docker/agent-mesh-common/a2a/proto/regen.sh
+//
+// (or run `python -m grpc_tools.protoc -I proto --python_out=_generated
+//  --grpc_python_out=_generated proto/a2a.proto` inside the adapter
+//  image — the Dockerfile invokes this as a build step.)
+
+syntax = "proto3";
+
+package a2a.v1;
+
+import "google/protobuf/struct.proto";
+import "google/protobuf/timestamp.proto";
+
+// ── Section 4.3: TaskState ──────────────────────────────────────────────────
+enum TaskState {
+  TASK_STATE_UNSPECIFIED   = 0;
+  TASK_STATE_SUBMITTED     = 1;
+  TASK_STATE_WORKING       = 2;
+  TASK_STATE_INPUT_REQUIRED = 3;
+  TASK_STATE_AUTH_REQUIRED = 4;
+  TASK_STATE_COMPLETED     = 5;
+  TASK_STATE_CANCELED      = 6;
+  TASK_STATE_FAILED        = 7;
+  TASK_STATE_REJECTED      = 8;
+  TASK_STATE_UNKNOWN       = 9;
+}
+
+enum Role {
+  ROLE_UNSPECIFIED = 0;
+  ROLE_USER        = 1;
+  ROLE_AGENT       = 2;
+}
+
+// ── Section 4.1.2: Part ────────────────────────────────────────────────────
+message TextPart   { string text = 1; }
+message RawPart    { string mime_type = 1; bytes data = 2; }
+message UrlPart    { string mime_type = 1; string url = 2; }
+message DataPart   { string mime_type = 1; google.protobuf.Struct data = 2; }
+
+message Part {
+  oneof kind {
+    TextPart text = 1;
+    RawPart  raw  = 2;
+    UrlPart  url  = 3;
+    DataPart data = 4;
+  }
+}
+
+// ── Section 4.1: Message ───────────────────────────────────────────────────
+message Message {
+  string  message_id = 1;
+  Role    role       = 2;
+  repeated Part parts = 3;
+  string  context_id = 4;
+  google.protobuf.Struct metadata = 5;
+}
+
+// ── Section 4.4: Artifact ──────────────────────────────────────────────────
+message Artifact {
+  string artifact_id = 1;
+  string name        = 2;
+  string description = 3;
+  repeated Part parts = 4;
+  google.protobuf.Struct metadata = 5;
+}
+
+// ── Section 4.3: TaskStatus / Task ─────────────────────────────────────────
+message TaskStatus {
+  TaskState                 state     = 1;
+  google.protobuf.Timestamp timestamp = 2;
+  Message                   message   = 3;
+  google.protobuf.Struct    error     = 4;
+}
+
+message Task {
+  string                     id          = 1;
+  string                     context_id  = 2;
+  TaskStatus                 status      = 3;
+  repeated Message           history     = 4;
+  repeated Artifact          artifacts   = 5;
+  google.protobuf.Struct     metadata    = 6;
+}
+
+// ── Section 4.2 / 11.4: stream events ──────────────────────────────────────
+message TaskStatusUpdateEvent {
+  string                 task_id    = 1;
+  string                 context_id = 2;
+  TaskStatus             status     = 3;
+  bool                   final      = 4;
+  google.protobuf.Struct metadata   = 5;
+}
+
+message TaskArtifactUpdateEvent {
+  string                 task_id    = 1;
+  string                 context_id = 2;
+  Artifact               artifact   = 3;
+  bool                   append     = 4;
+  bool                   last_chunk = 5;
+  google.protobuf.Struct metadata   = 6;
+}
+
+message StreamResponse {
+  oneof payload {
+    Task                    task           = 1;
+    TaskStatusUpdateEvent   status_update  = 2;
+    TaskArtifactUpdateEvent artifact_update= 3;
+  }
+}
+
+// ── Section 7.5: PushNotificationConfig ────────────────────────────────────
+message PushNotificationAuthentication {
+  repeated string schemes     = 1;
+  string          credentials = 2;
+}
+
+message PushNotificationConfig {
+  string id    = 1;
+  string url   = 2;
+  string token = 3;
+  PushNotificationAuthentication authentication = 4;
+}
+
+// ── Section 5: AgentCard (subset) ──────────────────────────────────────────
+message AgentInterface {
+  string transport = 1;  // "REST" | "JSONRPC" | "GRPC"
+  string url       = 2;
+}
+
+message AgentCapabilities {
+  bool streaming                = 1;
+  bool push_notifications       = 2;
+  bool state_transition_history = 3;
+}
+
+message AgentSkill {
+  string          id          = 1;
+  string          name        = 2;
+  string          description = 3;
+  repeated string tags        = 4;
+  repeated string examples    = 5;
+  repeated string input_modes = 6;
+  repeated string output_modes= 7;
+}
+
+message AgentCard {
+  string                   id               = 1;
+  string                   name             = 2;
+  string                   description      = 3;
+  string                   version          = 4;
+  string                   protocol_version = 5;
+  string                   url              = 6;
+  AgentCapabilities        capabilities     = 7;
+  repeated AgentInterface  interfaces       = 8;
+  repeated AgentSkill      skills           = 9;
+  repeated string          default_input_modes  = 10;
+  repeated string          default_output_modes = 11;
+  google.protobuf.Struct   metadata         = 12;
+}
+
+// ── Section 9.4: RPC envelopes ─────────────────────────────────────────────
+message SendMessageRequest {
+  Message message              = 1;
+  string  context_id           = 2;
+  bool    return_immediately   = 3;
+}
+
+message StreamMessageRequest {
+  Message message    = 1;
+  string  context_id = 2;
+}
+
+message GetTaskRequest {
+  string id              = 1;
+  int32  history_length  = 2;
+}
+
+message ListTasksRequest {
+  string    context_id              = 1;
+  TaskState status                  = 2;
+  int32     page_size               = 3;
+  string    page_token              = 4;
+  double    status_timestamp_after  = 5;
+  bool      include_artifacts       = 6;
+}
+
+message ListTasksResponse {
+  repeated Task tasks            = 1;
+  string        next_page_token  = 2;
+}
+
+message CancelTaskRequest    { string id = 1; }
+message ResubscribeRequest   { string id = 1; }
+message GetAgentCardRequest  {}
+
+message PushConfigRequest {
+  string                 task_id = 1;
+  PushNotificationConfig config  = 2;
+}
+
+message PushConfigQuery {
+  string task_id   = 1;
+  string config_id = 2;
+}
+
+message ListPushConfigsResponse {
+  repeated PushNotificationConfig configs = 1;
+}
+
+message Empty {}
+
+// ── Section 10: A2AService ─────────────────────────────────────────────────
+service A2AService {
+  rpc SendMessage   (SendMessageRequest)   returns (Task);
+  rpc StreamMessage (StreamMessageRequest) returns (stream StreamResponse);
+  rpc GetTask       (GetTaskRequest)       returns (Task);
+  rpc ListTasks     (ListTasksRequest)     returns (ListTasksResponse);
+  rpc CancelTask    (CancelTaskRequest)    returns (Task);
+  rpc ResubscribeToTask (ResubscribeRequest) returns (stream StreamResponse);
+
+  rpc SetPushNotificationConfig    (PushConfigRequest) returns (PushNotificationConfig);
+  rpc GetPushNotificationConfig    (PushConfigQuery)   returns (PushNotificationConfig);
+  rpc ListPushNotificationConfigs  (PushConfigQuery)   returns (ListPushConfigsResponse);
+  rpc DeletePushNotificationConfig (PushConfigQuery)   returns (Empty);
+
+  rpc GetAgentCard (GetAgentCardRequest) returns (AgentCard);
+}

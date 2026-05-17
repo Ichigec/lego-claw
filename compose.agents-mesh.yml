@@ -1,0 +1,344 @@
+# Agent-mesh adapters: thin FastAPI + MCP-SSE wrappers that expose the
+# Claw Code CLI and the OpenHands headless CLI as tools/agents reachable
+# over HTTP + MCP-SSE. Together they implement Track 1 («agent as tool»)
+# of the plan in plans/agent-mesh-tools-plus-a2a_*.plan.md.
+#
+# Both adapters sit on the existing `llm-stack-net` so that OpenWebUI,
+# LiteLLM, OpenHands and Claw Code can reach them by DNS name. They also
+# publish a LOOPBACK host port (127.0.0.1:<port>) so that the OpenHands
+# runtime-sandbox (default bridge, no llm-stack-net DNS) can reach the
+# adapter via `http://host.docker.internal:<port>`; see docs/openhands.md
+# lines around `host.docker.internal` for the same trick used by searchbox.
+#
+# Run separately from the main stack so the heavy docker-cli dependency
+# stays opt-in:
+#
+#   bash stack-start.sh                                                   # base stack
+#   docker compose --env-file .env -f compose.agents-mesh.yml up -d        # adapters
+#
+# Both adapters need `/var/run/docker.sock` (clawcode-adapter does `docker
+# exec clawcode claw …` on the long-lived clawcode container; openhands-
+# adapter spawns ephemeral `docker run` sandboxes). Read-only is NOT enough
+# for `docker exec`, so the mount is RW — the cycle-guard + bearer auth +
+# private loopback are the mitigations (same compromise as the original
+# `openhands` service in compose.openhands.yml).
+
+services:
+  clawcode-adapter:
+    build:
+      # Repo root is the build context so that the Dockerfile can COPY in
+      # both the shared `docker/agent-mesh-common/agent_mesh_adapter.py`
+      # and the adapter-specific `docker/clawcode-adapter/server.py`.
+      context: .
+      dockerfile: ./docker/clawcode-adapter/Dockerfile
+    image: voice-assistant-clawcode-adapter:local
+    container_name: clawcode-adapter
+    restart: unless-stopped
+    # No `depends_on:` — phoenix/litellm live in compose.phoenix.yml and are
+    # already up by the time stack-start.sh reaches the agent-mesh step.
+    # Cross-compose depends_on is not supported by `docker compose` v2 unless
+    # both files are merged into one project.
+    environment:
+      - LISTEN_PORT=8790
+      - LISTEN_HOST=0.0.0.0
+      - LOG_LEVEL=${AGENT_MESH_LOG_LEVEL:-info}
+      # Auth: same bearer used by OpenWebUI and LiteLLM A2A targets.
+      - CLAWCODE_ADAPTER_API_KEY=${CLAWCODE_ADAPTER_API_KEY:?CLAWCODE_ADAPTER_API_KEY must be set in .env}
+      # Cycle-guard ceiling (1 = agent A may call agent B, but B cannot
+      # delegate again). Increase with caution; see docs/agent-mesh.md.
+      - MAX_NESTED_AGENT_CALLS=${MAX_NESTED_AGENT_CALLS:-1}
+      # Container we exec into. Matches compose.clawcode.yml's container_name.
+      - CLAWCODE_CONTAINER=clawcode
+      - CLAWCODE_DEFAULT_MODEL=${CLAWCODE_DEFAULT_MODEL:-openai/qwen3.6-35b-heretic}
+      - CLAWCODE_ADAPTER_CONCURRENCY=${CLAWCODE_ADAPTER_CONCURRENCY:-2}
+      # Phoenix OTLP/HTTP — same project as the LiteLLM callback so that
+      # Track 1 (tool-mode) and Track 2 (A2A through LiteLLM) spans co-exist.
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://phoenix:6006/v1/traces
+      - OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf
+      - PHOENIX_PROJECT_NAME=${PHOENIX_PROJECT_NAME:-qwen3.6-heretic}
+      # ── A2A binding configuration ─────────────────────────────────────────
+      # `rest` always on; `jsonrpc` & `grpc` are P1/P2 togglable. The
+      # adapter falls back to REST-only when imports for the optional
+      # bindings (grpcio) are missing.
+      - A2A_BINDINGS=${A2A_BINDINGS:-rest,jsonrpc,grpc}
+      - A2A_GRPC_PORT=8796
+      # Skills + AgentCard plumbing (P0 wires these in the adapter; here
+      # we just provide the env so the runtime picks them up).
+      - SKILLS_DIR=/workspace/project/.ai/skills
+      - AGENT_CARD_KEYS_DIR=/run/secrets/a2a
+      # In-memory by default (Section 6 P2 plans Postgres via this DSN).
+      - A2A_TASK_STORE_DSN=${A2A_TASK_STORE_DSN:-memory://}
+      # Push notification dispatcher (Section 7.5) tuning.
+      - A2A_PUSH_MAX_RETRIES=${A2A_PUSH_MAX_RETRIES:-5}
+      - A2A_PUSH_BACKOFF_BASE_S=${A2A_PUSH_BACKOFF_BASE_S:-1.0}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      # `docker exec` socket. RW because exec needs it; bearer auth +
+      # cycle-guard + no public host-port are our compensating controls.
+      - /var/run/docker.sock:/var/run/docker.sock
+      # Shared `.ai/skills/` tree — read-only for the adapter (the
+      # `skills-manager` service is the only writer). Mounted at the same
+      # logical path the runtime agent will see inside the
+      # workspace tree (compose.clawcode.yml mounts the repo
+      # `.ai` at `/workspace/project/.ai`, mirror that here so spans/logs
+      # show the same absolute path).
+      - ./.ai:/workspace/project/.ai:ro
+      # JWS keypair lives in a named volume so `kid` survives container
+      # rebuilds (Agent Card signature stays stable for downstream
+      # cache/ETag).
+      - agent_mesh_keys:/run/secrets/a2a:rw
+    ports:
+      # Loopback ONLY. Other compose services reach us via DNS
+      # `http://clawcode-adapter:8790`. The runtime-sandbox spawned by
+      # OpenHands lives in the default bridge net and can reach us via
+      # `http://host.docker.internal:8790` thanks to this publish.
+      - "127.0.0.1:${CLAWCODE_ADAPTER_HOST_PORT:-8790}:8790"
+      # gRPC (A2A Section 10) sits on its own port. Loopback only.
+      - "127.0.0.1:${CLAWCODE_ADAPTER_GRPC_HOST_PORT:-8796}:8796"
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - 'curl -fsS -m 3 http://127.0.0.1:8790/healthz >/dev/null'
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+    networks: [llm-net]
+
+  openhands-adapter:
+    build:
+      context: .
+      dockerfile: ./docker/openhands-adapter/Dockerfile
+    image: voice-assistant-openhands-adapter:local
+    container_name: openhands-adapter
+    restart: unless-stopped
+    # No `depends_on:` — see note on clawcode-adapter above.
+    environment:
+      - LISTEN_PORT=8791
+      - LISTEN_HOST=0.0.0.0
+      - LOG_LEVEL=${AGENT_MESH_LOG_LEVEL:-info}
+      - OPENHANDS_ADAPTER_API_KEY=${OPENHANDS_ADAPTER_API_KEY:?OPENHANDS_ADAPTER_API_KEY must be set in .env}
+      - MAX_NESTED_AGENT_CALLS=${MAX_NESTED_AGENT_CALLS:-1}
+      - OPENHANDS_ADAPTER_CONCURRENCY=${OPENHANDS_ADAPTER_CONCURRENCY:-1}
+      - OPENHANDS_ADAPTER_TIMEOUT=${OPENHANDS_ADAPTER_TIMEOUT:-1800}
+      - OPENHANDS_DEFAULT_MODEL=${OPENHANDS_DEFAULT_MODEL:-qwen3.6-35b-heretic}
+      # LiteLLM endpoint the spawned runtime-sandbox should talk to. Mirrors
+      # the OpenHands GUI compose: host.docker.internal works from both the
+      # adapter container AND the runtime sandbox (default bridge net).
+      - OPENHANDS_LITELLM_BASE_URL=${OPENHANDS_LITELLM_BASE_URL:-http://host.docker.internal:4000/v1}
+      - OPENHANDS_LITELLM_API_KEY=${OPENHANDS_LITELLM_API_KEY:-${LITELLM_API_KEY:-sk-local}}
+      - LITELLM_API_KEY=${LITELLM_API_KEY:-sk-local}
+      - OPENHANDS_AGENT_SERVER_REPO=${OPENHANDS_AGENT_SERVER_REPO:-ghcr.io/openhands/agent-server}
+      - OPENHANDS_AGENT_SERVER_TAG=${OPENHANDS_AGENT_SERVER_TAG:-1.15.0-python}
+      - OPENHANDS_ADAPTER_WORKSPACE=/workspace/project
+      # Phoenix — same project name as clawcode-adapter and LiteLLM.
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://phoenix:6006/v1/traces
+      - OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf
+      - PHOENIX_PROJECT_NAME=${PHOENIX_PROJECT_NAME:-qwen3.6-heretic}
+      # ── A2A binding configuration ─────────────────────────────────────────
+      - A2A_BINDINGS=${A2A_BINDINGS:-rest,jsonrpc,grpc}
+      - A2A_GRPC_PORT=8797
+      - SKILLS_DIR=/workspace/project/.ai/skills
+      - AGENT_CARD_KEYS_DIR=/run/secrets/a2a
+      - A2A_TASK_STORE_DSN=${A2A_TASK_STORE_DSN:-memory://}
+      - A2A_PUSH_MAX_RETRIES=${A2A_PUSH_MAX_RETRIES:-5}
+      - A2A_PUSH_BACKOFF_BASE_S=${A2A_PUSH_BACKOFF_BASE_S:-1.0}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      # docker.sock: openhands-adapter spawns ephemeral `openhands` headless
+      # subprocesses that in turn spawn a runtime-sandbox container.
+      - /var/run/docker.sock:/var/run/docker.sock
+      # Shared agent workspace (same path as the OpenHands GUI's
+      # SANDBOX_VOLUMES) so the headless invocation lands in the same tree
+      # that the GUI / fsbox / clawcode see.
+      - ${OPENHANDS_WORKSPACE_DIR:-${HOME}/agent_dev}:/workspace/project
+      # Persistent state so `--resume` survives adapter restarts (mirrors
+      # the OpenHands GUI bind-mount). Optional.
+      - ${OPENHANDS_STATE_DIR:-${HOME}/.openhands}:/.openhands
+      # Same `.ai/skills/` tree as the clawcode-adapter so a skill toggled
+      # for both agents is immediately visible to both.
+      - ./.ai:/workspace/project/.ai:ro
+      - agent_mesh_keys:/run/secrets/a2a:rw
+    ports:
+      # Loopback ONLY — see clawcode-adapter for rationale.
+      - "127.0.0.1:${OPENHANDS_ADAPTER_HOST_PORT:-8791}:8791"
+      - "127.0.0.1:${OPENHANDS_ADAPTER_GRPC_HOST_PORT:-8797}:8797"
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - 'curl -fsS -m 3 http://127.0.0.1:8791/healthz >/dev/null'
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    networks: [llm-net]
+
+  # ── opencode-adapter ──────────────────────────────────────────────────────
+  # Bridges opencode (https://opencode.ai/) into the agent-mesh via its
+  # native ACP server (`opencode acp`, JSON-RPC 2.0 over NDJSON stdio).
+  # The adapter pipes JSON-RPC across `docker exec -i opencode opencode
+  # acp` and exposes the standard adapter contract (legacy /v1/run plus
+  # A2A REST + JSON-RPC + gRPC). Bring up `compose.opencode.yml` first
+  # so the long-lived `opencode` container is alive.
+  opencode-adapter:
+    build:
+      context: .
+      dockerfile: ./docker/opencode-adapter/Dockerfile
+    image: voice-assistant-opencode-adapter:local
+    container_name: opencode-adapter
+    restart: unless-stopped
+    # No `depends_on:` — phoenix/litellm live in compose.phoenix.yml and
+    # the opencode container in compose.opencode.yml. Adapter detects a
+    # missing/stopped opencode container via `docker inspect` and returns
+    # 503 with a remediation hint.
+    environment:
+      - LISTEN_PORT=8798
+      - LISTEN_HOST=0.0.0.0
+      - LOG_LEVEL=${AGENT_MESH_LOG_LEVEL:-info}
+      - OPENCODE_ADAPTER_API_KEY=${OPENCODE_ADAPTER_API_KEY:?OPENCODE_ADAPTER_API_KEY must be set in .env}
+      - MAX_NESTED_AGENT_CALLS=${MAX_NESTED_AGENT_CALLS:-1}
+      # Container we exec into. Matches compose.opencode.yml's container_name.
+      - OPENCODE_CONTAINER=opencode
+      - OPENCODE_ADAPTER_CONCURRENCY=${OPENCODE_ADAPTER_CONCURRENCY:-2}
+      - OPENCODE_ADAPTER_TIMEOUT=${OPENCODE_ADAPTER_TIMEOUT:-1200}
+      # Permission policy applied to opencode's `session/request_permission`
+      # callbacks. `workspace` (default) auto-approves iff every touched
+      # path stays inside /workspace/project; `all` approves everything
+      # (use only for trusted demos); `none` denies every permission
+      # request (strict mode for compliance audits).
+      - OPENCODE_ADAPTER_AUTO_APPROVE=${OPENCODE_ADAPTER_AUTO_APPROVE:-workspace}
+      # MCP server catalog (same JSON shape as compose.opencode.yml's
+      # MCP_SERVERS). Adapter uses it to hydrate bare skill-declared
+      # names (e.g. "searchbox") into the full {type,url,headers} or
+      # {command,args,env} structures opencode's `session/new` requires.
+      - OPENCODE_MCP_SERVERS=${OPENCODE_MCP_SERVERS:-[{"name":"searchbox","type":"sse","url":"http://searchbox:8090/sse"},{"name":"clawcode-adapter","type":"sse","url":"http://clawcode-adapter:8790/sse"},{"name":"openhands-adapter","type":"sse","url":"http://openhands-adapter:8791/sse"}]}
+      # Phoenix OTLP/HTTP — same project as the other adapters so Track 1
+      # (tool-mode) and Track 2 (A2A through LiteLLM) spans co-exist.
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://phoenix:6006/v1/traces
+      - OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf
+      - PHOENIX_PROJECT_NAME=${PHOENIX_PROJECT_NAME:-qwen3.6-heretic}
+      # ── A2A binding configuration ─────────────────────────────────────────
+      - A2A_BINDINGS=${A2A_BINDINGS:-rest,jsonrpc,grpc}
+      - A2A_GRPC_PORT=8799
+      - SKILLS_DIR=/workspace/project/.ai/skills
+      - AGENT_CARD_KEYS_DIR=/run/secrets/a2a
+      - A2A_TASK_STORE_DSN=${A2A_TASK_STORE_DSN:-memory://}
+      - A2A_PUSH_MAX_RETRIES=${A2A_PUSH_MAX_RETRIES:-5}
+      - A2A_PUSH_BACKOFF_BASE_S=${A2A_PUSH_BACKOFF_BASE_S:-1.0}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      # `docker exec` socket. RW because exec needs it; bearer auth +
+      # cycle-guard + no public host-port are our compensating controls.
+      - /var/run/docker.sock:/var/run/docker.sock
+      # Shared `.ai/skills/` tree — read-only for the adapter (mounted
+      # at the same path opencode itself sees inside its container so
+      # spans/logs reference identical absolute paths).
+      - ./.ai:/workspace/project/.ai:ro
+      # JWS keypair lives in the same named volume as the other two
+      # adapters so Agent Card signatures share `kid` namespace.
+      - agent_mesh_keys:/run/secrets/a2a:rw
+    ports:
+      # Loopback ONLY. Other compose services reach us via
+      # `http://opencode-adapter:8798`.
+      - "127.0.0.1:${OPENCODE_ADAPTER_HOST_PORT:-8798}:8798"
+      # gRPC (A2A Section 10) on its own port. Loopback only.
+      - "127.0.0.1:${OPENCODE_ADAPTER_GRPC_HOST_PORT:-8799}:8799"
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - 'curl -fsS -m 3 http://127.0.0.1:8798/healthz >/dev/null'
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+    networks: [llm-net]
+
+  # ── agent-registry ─────────────────────────────────────────────────────────
+  # Single entry-point that OpenWebUI registers as ONE tool-server instead of
+  # one per adapter. It fans out ListTasks across all configured adapters,
+  # caches the JWS-signed AgentCard per adapter, and proxies REST/SSE
+  # message:send|stream|cancel|subscribe by `agentId`.
+  agent-registry:
+    build:
+      context: .
+      dockerfile: ./docker/agent-registry/Dockerfile
+    image: voice-assistant-agent-registry:local
+    container_name: agent-registry
+    restart: unless-stopped
+    environment:
+      - LISTEN_PORT=8000
+      - LISTEN_HOST=0.0.0.0
+      - LOG_LEVEL=${AGENT_MESH_LOG_LEVEL:-info}
+      - AGENT_REGISTRY_API_KEY=${AGENT_REGISTRY_API_KEY:?AGENT_REGISTRY_API_KEY must be set in .env}
+      # CSV of agentId:host:port (DNS inside llm-stack-net). Each adapter
+      # exposes /.well-known/agent-card.json (Section 8) on its REST port.
+      - AGENT_REGISTRY_AGENTS=${AGENT_REGISTRY_AGENTS:-clawcode=clawcode-adapter:8790,openhands=openhands-adapter:8791,opencode=opencode-adapter:8798}
+      # Per-agent bearer tokens forwarded transparently to the upstream
+      # adapter. The registry never inspects task payloads — it just relays.
+      - CLAWCODE_ADAPTER_API_KEY=${CLAWCODE_ADAPTER_API_KEY:-}
+      - OPENHANDS_ADAPTER_API_KEY=${OPENHANDS_ADAPTER_API_KEY:-}
+      - OPENCODE_ADAPTER_API_KEY=${OPENCODE_ADAPTER_API_KEY:-}
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://phoenix:6006/v1/traces
+      - OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf
+      - PHOENIX_PROJECT_NAME=${PHOENIX_PROJECT_NAME:-qwen3.6-heretic}
+    ports:
+      - "127.0.0.1:${AGENT_REGISTRY_HOST_PORT:-8794}:8000"
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - 'curl -fsS -m 3 http://127.0.0.1:8000/healthz >/dev/null'
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    networks: [llm-net]
+
+  # ── skills-manager ─────────────────────────────────────────────────────────
+  # CRUD over `.ai/skills/`. RW mount (the only writer). On every write it
+  # POSTs `/admin/reload` to each adapter so AgentCard.version bumps and
+  # downstream ETag caches invalidate (Section 8.6).
+  skills-manager:
+    build:
+      context: .
+      dockerfile: ./docker/skills-manager/Dockerfile
+    image: voice-assistant-skills-manager:local
+    container_name: skills-manager
+    restart: unless-stopped
+    environment:
+      - LISTEN_PORT=8000
+      - LISTEN_HOST=0.0.0.0
+      - LOG_LEVEL=${AGENT_MESH_LOG_LEVEL:-info}
+      - SKILLS_MANAGER_API_KEY=${SKILLS_MANAGER_API_KEY:?SKILLS_MANAGER_API_KEY must be set in .env}
+      - SKILLS_DIR=/workspace/.ai/skills
+      # CSV of `agentId=base-url`. Used for the /admin/reload broadcast.
+      - SKILLS_ADAPTERS=${SKILLS_ADAPTERS:-clawcode=http://clawcode-adapter:8790,openhands=http://openhands-adapter:8791,opencode=http://opencode-adapter:8798}
+      - CLAWCODE_ADAPTER_API_KEY=${CLAWCODE_ADAPTER_API_KEY:-}
+      - OPENHANDS_ADAPTER_API_KEY=${OPENHANDS_ADAPTER_API_KEY:-}
+      - OPENCODE_ADAPTER_API_KEY=${OPENCODE_ADAPTER_API_KEY:-}
+    volumes:
+      - ./.ai:/workspace/.ai:rw
+    ports:
+      - "127.0.0.1:${SKILLS_MANAGER_HOST_PORT:-8795}:8000"
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - 'curl -fsS -m 3 http://127.0.0.1:8000/healthz >/dev/null'
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    networks: [llm-net]
+
+volumes:
+  # Persistent JWS keypair used by every adapter to sign the AgentCard
+  # (Section 8.4.2). Kept across container rebuilds so `kid` stays stable.
+  agent_mesh_keys:
+    name: agent_mesh_keys
+
+networks:
+  llm-net:
+    external: true
+    name: llm-stack-net

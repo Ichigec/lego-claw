@@ -1,0 +1,67 @@
+services:
+  localai:
+    # Image is overridden by LOCALAI_IMAGE env var (set automatically by localai-start.sh).
+    # Defaults to the x86-64 CUDA-12 image; ARM64/L4T uses latest-nvidia-l4t-arm64-cuda-13.
+    image: ${LOCALAI_IMAGE:-localai/localai:latest-gpu-nvidia-cuda-12}
+    container_name: localai
+    restart: unless-stopped
+    runtime: nvidia
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    ports:
+      - "${LOCALAI_HOST_PORT:-8180}:8080"
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - DEBUG=false
+      - LOCALAI_MODELS_PATH=/models
+      - LOCALAI_DATA_PATH=/data
+      - CONTEXT_SIZE=${LOCALAI_CONTEXT_SIZE:-8192}
+      - CORS=true
+      # Force unload of the previously active model whenever a new request
+      # targets the same backend. Without this the qwen-tts backend tries to
+      # co-load 0.6B and 1.7B Qwen3-TTS into one grpc process and OOMs the
+      # second one. Has no downside for our single-user audio workload.
+      - LOCALAI_SINGLE_ACTIVE_BACKEND=true
+      # CUDA allocator tuning for GB10/L4T-ARM64 unified memory:
+      # — expandable_segments:True — let PyTorch grow segments dynamically
+      #   instead of reserving a huge contiguous slab up front; critical when
+      #   LM Studio already holds 70+ GB and free memory is fragmented.
+      # — max_split_size_mb:512 — cap individual blocks so the allocator does
+      #   not refuse the next 2-4 GB request because the pool is fragmented.
+      # — garbage_collection_threshold:0.6 — release inactive blocks more
+      #   eagerly when usage crosses 60 % of the budget.
+      # Reference: https://pytorch.org/docs/stable/notes/cuda.html#environment-variables
+      - PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True,max_split_size_mb:512,garbage_collection_threshold:0.6
+    volumes:
+      - localai_models:/models
+      - localai_data:/data
+      - ${LMSTUDIO_MODELS_DIR:-${HOME}/.lm-studio/models}:/lm-studio-models:ro
+      - ./docker/localai/models/stt-whisper-large-v3-turbo.yaml:/models/stt-whisper-large-v3-turbo.yaml:ro
+      - ./docker/localai/models/stt-faster-whisper-large-v3.yaml:/models/stt-faster-whisper-large-v3.yaml:ro
+      - ./docker/localai/models/tts-qwen3-1.7b.yaml:/models/tts-qwen3-1.7b.yaml:ro
+      - ./docker/localai/models/tts-fish-speech.yaml:/models/tts-fish-speech.yaml:ro
+      - ./docker/localai/models/vad-silero.yaml:/models/vad-silero.yaml:ro
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/readyz"]
+      interval: 30s
+      timeout: 20s
+      retries: 5
+      start_period: 60s
+    networks:
+      - llm-net
+
+networks:
+  llm-net:
+    external: true
+    name: llm-stack-net
+
+volumes:
+  localai_models:
+    name: localai-models-volume
+  localai_data:
+    name: localai-data-volume

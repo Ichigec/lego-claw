@@ -1,0 +1,30 @@
+[project]
+name = "searchbox-mcp"
+version = "0.2.0"
+description = "MCP Search server: SearXNG, Wikipedia, arXiv, GitHub, HN, StackExchange, Crossref/OpenAlex, PyPI/NPM, DuckDuckGo, optional Brave/Google/Tavily"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "lego-claw contributors" }]
+
+dependencies = [
+    "mcp>=1.2",
+    "fastmcp>=0.2",
+    "httpx>=0.27",
+    "duckduckgo-search>=6.0",
+    "pydantic>=2.5",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+    "respx>=0.22",
+]
+
+[project.scripts]
+searchbox-mcp = "server:main"
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]

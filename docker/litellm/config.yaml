@@ -1,0 +1,370 @@
+# LiteLLM Proxy конфиг: единый OpenAI v1 gateway для UI-клиентов.
+# OpenWebUI (и любые другие OpenAI-совместимые клиенты — OpenHands, opencode, Claw Code)
+# ходят в LiteLLM, а сам LiteLLM проксирует в host-side LM Studio / llama.cpp / LocalAI /
+# vLLM (или другие источники, если добавить alias ниже). Phoenix callback публикует span'ы
+# запросов в Phoenix, так что добавление новых model_name не меняет tracing-границу для клиентов.
+
+model_list:
+  # ── Audio models proxied to LocalAI through the same LiteLLM gateway ────────
+  # LocalAI v4 holds the actual STT/TTS/VAD backends as plugin OCI images
+  # (see localai-start.sh → ensure_backends). The aliases below stay stable
+  # so OpenWebUI Admin Panel and .env.openwebui never need to know which
+  # concrete LocalAI model id is wired underneath. A/B winner is promoted
+  # to `tts-ru-default`; the runner-up keeps the `tts-ru-alt` alias.
+  - model_name: "stt-whisper-cuda-turbo"
+    litellm_params:
+      model: "openai/whisper-large-turbo-q5_0"
+      api_base: "os.environ/LOCALAI_API_BASE"
+      api_key: "os.environ/LOCALAI_API_KEY"
+    model_info:
+      mode: audio_transcription
+
+  # A/B winner 2026-05 (выбран по blind listening на 18-словном RU-тексте):
+  # Qwen3-TTS-1.7B. Голос более естественный чем 0.6B, без явного «робото-
+  # фоновой» окраски. Hot-cache ~3.2 с через LiteLLM, ~2.7 с напрямую,
+  # cold-start ~41 с. VRAM ~4.4 ГБ. Работает рядом с LM Studio (73 ГБ
+  # unified) благодаря PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+  # и LOCALAI_SINGLE_ACTIVE_BACKEND=true (см. compose.localai.yml).
+  # Каверзный артефакт на длинных текстах: модель может вставлять
+  # вокализы вроде «Эх...» в начале — если критично, переключайте на
+  # tts-ru-alt (0.6B) или tts-piper-ru-fallback (без галлюцинаций).
+  - model_name: "tts-ru-default"
+    litellm_params:
+      model: "openai/qwen3-tts-1.7b-custom-voice"
+      api_base: "os.environ/LOCALAI_API_BASE"
+      api_key: "os.environ/LOCALAI_API_KEY"
+    model_info:
+      mode: audio_speech
+
+  # Same backend (qwen-tts), 0.6B весов — компактнее (~2.6 ГБ VRAM),
+  # читает тексты буквальнее (без вокализных вставок), но голос слышимо
+  # более «роботизированный». Hot-cache ~5.8 с через LiteLLM.
+  - model_name: "tts-ru-alt"
+    litellm_params:
+      model: "openai/qwen3-tts-0.6b-custom-voice"
+      api_base: "os.environ/LOCALAI_API_BASE"
+      api_key: "os.environ/LOCALAI_API_KEY"
+    model_info:
+      mode: audio_speech
+
+  # Reserved for fish-speech when upstream backend image stops shipping with a
+  # broken Python module (currently: "No module named fish_speech.inference_engine").
+  # Backend is installed (cuda13-nvidia-l4t-arm64-fish-speech), only the model
+  # registration is held back. Uncomment after re-pulling the backend image.
+  # - model_name: "tts-ru-fish"
+  #   litellm_params:
+  #     model: "openai/fish-speech-1.5"
+  #     api_base: "os.environ/LOCALAI_API_BASE"
+  #     api_key: "os.environ/LOCALAI_API_KEY"
+  #   model_info:
+  #     mode: audio_speech
+
+  - model_name: "tts-piper-ru-fallback"
+    litellm_params:
+      model: "openai/voice-ru_RU-irina-medium"
+      api_base: "os.environ/LOCALAI_API_BASE"
+      api_key: "os.environ/LOCALAI_API_KEY"
+    model_info:
+      mode: audio_speech
+
+  # Deprecated: kept until existing chats stop referencing the legacy ids.
+  # Backed by stale LocalAI YAML registrations whose backends are no longer
+  # the recommended choice (qwen-tts backend → superseded by faster-qwen3-tts;
+  # whisper-large-v3-turbo file → superseded by quantized whisper-large-turbo-q5_0).
+  - model_name: "stt-whisper-large-v3-turbo"
+    litellm_params:
+      model: "openai/stt-whisper-large-v3-turbo"
+      api_base: "os.environ/LOCALAI_API_BASE"
+      api_key: "os.environ/LOCALAI_API_KEY"
+    model_info:
+      mode: audio_transcription
+
+  - model_name: "tts-qwen3-1.7b"
+    litellm_params:
+      model: "openai/tts-qwen3-1.7b"
+      api_base: "os.environ/LOCALAI_API_BASE"
+      api_key: "os.environ/LOCALAI_API_KEY"
+    model_info:
+      mode: audio_speech
+      health_check_voice: Aiden
+
+  # Stable public alias (STACK_DEFAULT_LITELLM_CHAT_MODEL, Claw, OpenHands defaults).
+  # Default routing: same weights as `tvall43-qwen3.6-35b-a3b-heretic` via LM Studio
+  # on the host (:1234). If you run a dedicated llama-server instead, switch both
+  # `api_base`/`api_key` back to LLAMA_CPP_* and set `model` to
+  # `openai/qwen3.6-35b-heretic` (see llamacpp-host-start.sh, default host :8090).
+  - model_name: "qwen3.6-35b-heretic"
+    litellm_params:
+      model: "openai/tvall43-qwen3.6-35b-a3b-heretic"
+      api_base: "os.environ/LMSTUDIO_API_BASE"
+      api_key: "os.environ/LMSTUDIO_API_KEY"
+
+  # Same upstream as the short alias; id matches Rust `claw` CLI (provider/model).
+  - model_name: "openai/qwen3.6-35b-heretic"
+    litellm_params:
+      model: "openai/tvall43-qwen3.6-35b-a3b-heretic"
+      api_base: "os.environ/LMSTUDIO_API_BASE"
+      api_key: "os.environ/LMSTUDIO_API_KEY"
+
+  # Pattern B: OpenAI-compatible micro-proxy on llm-stack-net (compose.phoenix.yml →
+  # openai-stack-relay). LiteLLM → relay → LiteLLM with a fixed upstream model id.
+  - model_name: "stack-openai-relay-qwen36"
+    litellm_params:
+      model: "openai/qwen3.6-35b-heretic"
+      api_base: "http://openai-stack-relay:8088/v1"
+      api_key: "os.environ/LITELLM_MASTER_KEY"
+
+  # ── Agent-mesh Track 2 (LiteLLM as A2A gateway) ────────────────────────────
+  # Two agent-as-tool aliases backed by the real adapters in
+  # compose.agents-mesh.yml. Each maps to one POST /v1/run on the adapter; we
+  # do NOT speak OpenAI chat-completions here — the alias exists so that
+  # LLM-facing clients can name an agent by id and have LiteLLM dispatch to
+  # the adapter (master_key gates auth at the LiteLLM edge; the adapter's
+  # own bearer is set via os.environ/*_ADAPTER_API_KEY).
+  #
+  # The LiteLLM A2A Agent Gateway feature (https://docs.litellm.ai/docs/a2a)
+  # is currently beta in v1.83.x and is most reliably configured via the
+  # Admin UI (see docs/agent-mesh.md → «A2A registration»). The yaml block
+  # below is the «source of truth» mirror so that a fresh DB / `STORE_MODEL_
+  # IN_DB=False` deployment still routes to the same backend. Comment-out the
+  # entries if you keep registrations exclusively in the Admin UI.
+  - model_name: "agent/clawcode"
+    litellm_params:
+      model: "openai/clawcode-adapter"
+      api_base: "http://clawcode-adapter:8790/v1"
+      api_key: "os.environ/CLAWCODE_ADAPTER_API_KEY"
+      timeout: 1200
+      request_timeout: 1200
+      max_retries: 0
+    model_info:
+      mode: agent
+      description: >-
+        Headless Claw Code (Rust CLI) delegated as a tool via
+        clawcode-adapter (compose.agents-mesh.yml). One call = one task.
+        Cycle guard: X-Agent-Mesh-Depth ≥ MAX_NESTED_AGENT_CALLS → refused.
+
+  - model_name: "agent/openhands"
+    litellm_params:
+      model: "openai/openhands-adapter"
+      api_base: "http://openhands-adapter:8791/v1"
+      api_key: "os.environ/OPENHANDS_ADAPTER_API_KEY"
+      timeout: 3600
+      request_timeout: 3600
+      max_retries: 0
+    model_info:
+      mode: agent
+      description: >-
+        Headless OpenHands 1.6 delegated as a tool via openhands-adapter
+        (compose.agents-mesh.yml). Each call spawns one ephemeral runtime
+        sandbox via docker.sock. Cycle guard: X-Agent-Mesh-Depth ≥
+        MAX_NESTED_AGENT_CALLS → refused.
+
+  - model_name: "agent/opencode"
+    litellm_params:
+      model: "openai/opencode-adapter"
+      api_base: "http://opencode-adapter:8798/v1"
+      api_key: "os.environ/OPENCODE_ADAPTER_API_KEY"
+      timeout: 1200
+      request_timeout: 1200
+      max_retries: 0
+    model_info:
+      mode: agent
+      description: >-
+        opencode (https://opencode.ai/) bridged via ACP (JSON-RPC over
+        `docker exec opencode opencode acp` stdio) and exposed as A2A.
+        One call = one ACP prompt turn (session/new + session/prompt).
+        Cycle guard: X-Agent-Mesh-Depth ≥ MAX_NESTED_AGENT_CALLS → refused.
+
+  # Direct passthrough aliases for all models currently published by LM Studio.
+  - model_name: "tvall43-qwen3.6-35b-a3b-heretic"
+    litellm_params:
+      model: "openai/tvall43-qwen3.6-35b-a3b-heretic"
+      api_base: "os.environ/LMSTUDIO_API_BASE"
+      api_key: "os.environ/LMSTUDIO_API_KEY"
+
+  - model_name: "huihui-ai_qwen3-coder-next-abliterated"
+    litellm_params:
+      model: "openai/huihui-ai_qwen3-coder-next-abliterated"
+      api_base: "os.environ/LMSTUDIO_API_BASE"
+      api_key: "os.environ/LMSTUDIO_API_KEY"
+
+  - model_name: "gemma-4-26b-a4b-it-ara-abliterated"
+    litellm_params:
+      model: "openai/gemma-4-26b-a4b-it-ara-abliterated"
+      api_base: "os.environ/LMSTUDIO_API_BASE"
+      api_key: "os.environ/LMSTUDIO_API_KEY"
+
+  - model_name: "nvidia/nemotron-3-super"
+    litellm_params:
+      model: "openai/nvidia/nemotron-3-super"
+      api_base: "os.environ/LMSTUDIO_API_BASE"
+      api_key: "os.environ/LMSTUDIO_API_KEY"
+
+  - model_name: "qwen3.5-122b-a10b-abliterated-i1"
+    litellm_params:
+      model: "openai/qwen3.5-122b-a10b-abliterated-i1"
+      api_base: "os.environ/LMSTUDIO_API_BASE"
+      api_key: "os.environ/LMSTUDIO_API_KEY"
+
+  - model_name: "tnt3530/qwen3.5-122b-a10b-abliterated"
+    litellm_params:
+      model: "openai/tnt3530/qwen3.5-122b-a10b-abliterated"
+      api_base: "os.environ/LMSTUDIO_API_BASE"
+      api_key: "os.environ/LMSTUDIO_API_KEY"
+
+  - model_name: "qwen3.5-122b-a10b-abliterated-v1-i1"
+    litellm_params:
+      model: "openai/qwen3.5-122b-a10b-abliterated-v1-i1"
+      api_base: "os.environ/LMSTUDIO_API_BASE"
+      api_key: "os.environ/LMSTUDIO_API_KEY"
+
+  - model_name: "qwen3.5-122b-a10b-abliterated-v1@q5_k_m"
+    litellm_params:
+      model: "openai/qwen3.5-122b-a10b-abliterated-v1@q5_k_m"
+      api_base: "os.environ/LMSTUDIO_API_BASE"
+      api_key: "os.environ/LMSTUDIO_API_KEY"
+
+  - model_name: "qwen3.5-122b-a10b-abliterated-v1@q6_k"
+    litellm_params:
+      model: "openai/qwen3.5-122b-a10b-abliterated-v1@q6_k"
+      api_base: "os.environ/LMSTUDIO_API_BASE"
+      api_key: "os.environ/LMSTUDIO_API_KEY"
+
+  - model_name: "qwen3.5-35b-a3b-uncensored-heretic"
+    litellm_params:
+      model: "openai/qwen3.5-35b-a3b-uncensored-heretic"
+      api_base: "os.environ/LMSTUDIO_API_BASE"
+      api_key: "os.environ/LMSTUDIO_API_KEY"
+
+  - model_name: "mradermacher/qwen3.5-122b-a10b-abliterated"
+    litellm_params:
+      model: "openai/mradermacher/qwen3.5-122b-a10b-abliterated"
+      api_base: "os.environ/LMSTUDIO_API_BASE"
+      api_key: "os.environ/LMSTUDIO_API_KEY"
+
+  - model_name: "qwen_qwen3.5-35b-a3b@q6_k_l"
+    litellm_params:
+      model: "openai/qwen_qwen3.5-35b-a3b@q6_k_l"
+      api_base: "os.environ/LMSTUDIO_API_BASE"
+      api_key: "os.environ/LMSTUDIO_API_KEY"
+
+  - model_name: "qwen_qwen3.5-35b-a3b@q8_0"
+    litellm_params:
+      model: "openai/qwen_qwen3.5-35b-a3b@q8_0"
+      api_base: "os.environ/LMSTUDIO_API_BASE"
+      api_key: "os.environ/LMSTUDIO_API_KEY"
+
+  - model_name: "qwen_qwen3.5-35b-a3b@bf16"
+    litellm_params:
+      model: "openai/qwen_qwen3.5-35b-a3b@bf16"
+      api_base: "os.environ/LMSTUDIO_API_BASE"
+      api_key: "os.environ/LMSTUDIO_API_KEY"
+
+  - model_name: "gemma-4-26b-a4b-it-ultra-uncensored-heretic"
+    litellm_params:
+      model: "openai/gemma-4-26b-a4b-it-ultra-uncensored-heretic"
+      api_base: "os.environ/LMSTUDIO_API_BASE"
+      api_key: "os.environ/LMSTUDIO_API_KEY"
+
+  - model_name: "gemma-4-31b-it"
+    litellm_params:
+      model: "openai/gemma-4-31b-it"
+      api_base: "os.environ/LMSTUDIO_API_BASE"
+      api_key: "os.environ/LMSTUDIO_API_KEY"
+
+  - model_name: "qwen3.5-35b-a3b"
+    litellm_params:
+      model: "openai/qwen3.5-35b-a3b"
+      api_base: "os.environ/LMSTUDIO_API_BASE"
+      api_key: "os.environ/LMSTUDIO_API_KEY"
+
+  - model_name: "huihui-qwen3.5-122b-a10b-abliterated"
+    litellm_params:
+      model: "openai/huihui-qwen3.5-122b-a10b-abliterated"
+      api_base: "os.environ/LMSTUDIO_API_BASE"
+      api_key: "os.environ/LMSTUDIO_API_KEY"
+
+  - model_name: "text-embedding-nomic-embed-text-v1.5"
+    litellm_params:
+      model: "openai/text-embedding-nomic-embed-text-v1.5"
+      api_base: "os.environ/LMSTUDIO_API_BASE"
+      api_key: "os.environ/LMSTUDIO_API_KEY"
+    model_info:
+      mode: embedding
+
+  # vLLM lane: контейнер запускается с `--served-model-name gemma-4-26B-lowmem`
+  # и слушает host:8000. LiteLLM видит его как http://host.docker.internal:8000/v1.
+  # Алиас можно держать прописанным постоянно — пока vLLM грузит веса, запросы
+  # будут падать с 503/connection refused, а как только vLLM поднимется,
+  # LiteLLM подхватит без рестарта. Большой timeout нужен на первую горячую
+  # генерацию (CUDA graph compile + первый prefill).
+  - model_name: "gemma-4-26B-lowmem"
+    litellm_params:
+      model: "openai/gemma-4-26B-lowmem"
+      api_base: "os.environ/VLLM_API_BASE"
+      api_key: "os.environ/VLLM_API_KEY"
+      request_timeout: 600
+      max_retries: 0
+    model_info:
+      mode: chat
+
+  # Example: proxy another OpenAI-compatible source through the same LiteLLM gateway.
+  # OpenWebUI will automatically discover the alias via GET /v1/models once this block is enabled.
+  # - model_name: remote-gpt-4o-mini
+  #   litellm_params:
+  #     model: openai/gpt-4o-mini
+  #     api_base: os.environ/REMOTE_OPENAI_API_BASE
+  #     api_key: os.environ/REMOTE_OPENAI_API_KEY
+
+  # Example: proxy a non-OpenAI source behind a LiteLLM alias.
+  # - model_name: ollama-phi4
+  #   litellm_params:
+  #     model: ollama_chat/phi4
+  #     api_base: os.environ/OLLAMA_API_BASE
+
+mcp_servers:
+  # Native MCP endpoint from compose.searchbox.yml. LiteLLM clients can use it
+  # through the proxy MCP gateway, e.g. server_url="litellm_proxy/mcp/searchbox".
+  # OpenWebUI still uses the OpenAPI bridge on searchbox:8001 separately.
+  searchbox:
+    url: "http://searchbox:8090/mcp"
+    transport: "http"
+    available_on_public_internet: false
+    description: >-
+      Multi-engine local search MCP server: SearXNG, Wikipedia/Wikidata,
+      arXiv, GitHub, Hacker News, StackExchange, Crossref/OpenAlex,
+      PyPI/NPM, DuckDuckGo, and optional Brave/Google/Tavily.
+    allowed_tools:
+      - search
+      - search_searxng
+      - search_wikipedia
+      - search_wikidata
+      - search_arxiv
+      - search_github
+      - search_hackernews
+      - search_stackexchange
+      - search_crossref
+      - search_openalex
+      - search_pypi
+      - search_npm
+      - search_duckduckgo
+      - search_brave
+      - search_google
+      - search_tavily
+      - list_engines
+      - search_status
+
+litellm_settings:
+  success_callback: ["arize_phoenix"]
+  failure_callback: ["arize_phoenix"]
+  drop_params: true
+
+environment_variables:
+  PHOENIX_COLLECTOR_ENDPOINT: http://phoenix:6006
+  # Phoenix project shared with the agent-mesh adapters so that the
+  # Track 2 (A2A) and Track 1 (tool-mode) spans land in one place. The
+  # adapters set the same project via PHOENIX_PROJECT_NAME in compose.agents-mesh.yml.
+  PHOENIX_PROJECT_NAME: qwen3.6-heretic
+
+general_settings:
+  master_key: os.environ/LITELLM_MASTER_KEY

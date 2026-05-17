@@ -1,0 +1,5 @@
+services:
+  localai:
+    volumes:
+      - ./docker/localai/models/qwen3.6-35b-heretic.yaml:/models/qwen3.6-35b-heretic.yaml:ro
+      - ${LMSTUDIO_MODELS_DIR:-${HOME}/.lmstudio/models}/CCSSNE:/models/legacy-qwen/CCSSNE:ro

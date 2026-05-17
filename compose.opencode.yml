@@ -1,0 +1,84 @@
+# opencode (https://opencode.ai/) — terminal coding agent + native ACP
+# bridge.  Mirrors compose.clawcode.yml: idle long-lived container that
+# stays alive via `tail -f /dev/null`, so subsequent `docker exec` calls
+# can either start the TUI for humans (`docker exec -it opencode opencode`)
+# or pipe an ACP JSON-RPC session for opencode-adapter
+# (`docker exec -i opencode opencode acp`).
+#
+# The adapter (compose.agents-mesh.yml) connects via docker.sock; this
+# file only stands up the agent itself. Two-step bring-up keeps the
+# heavy docker-cli dependency out of the base stack.
+
+services:
+  opencode:
+    image: ${OPENCODE_IMAGE:-voice-assistant-opencode:local}
+    container_name: opencode
+    restart: "no"
+    pull_policy: never
+    build:
+      context: ./docker/opencode
+      dockerfile: Dockerfile
+      args:
+        NODE_VERSION: ${OPENCODE_NODE_VERSION:-22}
+        OPENCODE_USER_UID: ${OPENCODE_USER_UID:-10102}
+        OPENCODE_USER_GID: ${OPENCODE_USER_GID:-10102}
+        OPENCODE_VERSION: ${OPENCODE_VERSION:-}
+        OPENCODE_EXTRA_LSP: ${OPENCODE_EXTRA_LSP:-}
+    # Interactive STDIN/TTY so `docker exec -it opencode opencode` (TUI)
+    # works just like clawcode. `docker exec -i opencode opencode acp`
+    # also reuses the same long-lived process.
+    stdin_open: true
+    tty: true
+    init: true
+    user: "${OPENCODE_USER_UID:-10102}:${OPENCODE_USER_GID:-10102}"
+    working_dir: /workspace/project
+    environment:
+      # OpenAI-compatible LiteLLM upstream. opencode reads
+      # OPENAI_BASE_URL/_API_KEY by default; the JSON config (mounted
+      # below) explicitly references LITELLM_API_KEY too so the
+      # `litellm` provider entry resolves cleanly.
+      - OPENAI_BASE_URL=${OPENCODE_LITELLM_BASE_URL:-http://litellm:4000/v1}
+      - OPENAI_API_KEY=${OPENCODE_LITELLM_API_KEY:-${LITELLM_API_KEY:-sk-local}}
+      - LITELLM_API_KEY=${OPENCODE_LITELLM_API_KEY:-${LITELLM_API_KEY:-sk-local}}
+      # State / config paths.
+      - OPENCODE_HOME=/.opencode
+      - OPENCODE_CONFIG_DIR=/home/opencode/.config/opencode
+      # MCP cross-wiring. JSON list consumed by opencode at session
+      # bootstrap. Excludes the opencode-adapter itself to prevent
+      # self-loops (cycle guard at config level + adapter Headers).
+      - MCP_SERVERS=${OPENCODE_MCP_SERVERS:-[{"name":"searchbox","type":"sse","url":"http://searchbox:8090/sse"}]}
+      # Skip noisy LSP auto-download on first run inside the container —
+      # the Dockerfile pre-installs pyright + ts-language-server; users
+      # who want more languages set OPENCODE_EXTRA_LSP at build time.
+      - OPENCODE_DISABLE_LSP_DOWNLOAD=${OPENCODE_DISABLE_LSP_DOWNLOAD:-true}
+    volumes:
+      # Shared agent sandbox — same path as clawcode / openhands so all
+      # three agents see one tree.
+      - ${OPENCODE_WORKSPACE_DIR:-${HOME}/agent_dev}:/workspace/project:rw
+      # Persistent state (sessions / tool caches). Lives outside the repo.
+      - ${OPENCODE_STATE_DIR:-${HOME}/.opencode}:/.opencode:rw
+      # Shared `.ai/` skills tree — read-only mount; skills-manager is the
+      # only writer (compose.agents-mesh.yml). opencode natively picks up
+      # `AGENTS.md` from the workspace root.
+      - ${OPENCODE_SKILLS_DIR:-./.ai}:/workspace/project/.ai:ro
+      # opencode config (provider list, default model). Mounted from
+      # docker/opencode/opencode.json so changes are git-tracked.
+      - ./docker/opencode/opencode.json:/home/opencode/.config/opencode/opencode.json:ro
+    networks:
+      - llm-net
+    ports:
+      # Loopback host-port reserved for the optional `opencode web` UI.
+      # The web server itself is NOT started by default — run
+      # `bash opencode-web-start.sh` (which exec's `opencode web ...`
+      # inside the container) to bring it up on demand. The port stays
+      # available even when the web UI is idle, mirroring the OpenHands
+      # GUI publish (:3300) so the dev-host has consistent shortcuts.
+      - "127.0.0.1:${OPENCODE_WEB_HOST_PORT:-3400}:4096"
+    # Idle by default; humans get a TUI via `docker exec -it opencode opencode`,
+    # the adapter pipes JSON-RPC via `docker exec -i opencode opencode acp`.
+    command: ["tail", "-f", "/dev/null"]
+
+networks:
+  llm-net:
+    external: true
+    name: llm-stack-net

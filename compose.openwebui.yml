@@ -1,0 +1,88 @@
+services:
+  open-webui:
+    image: ghcr.io/open-webui/open-webui:main
+    container_name: open-webui
+    restart: unless-stopped
+    ports:
+      - "${OPENWEBUI_HOST_PORT:-3000}:8080"
+    environment:
+      - WEBUI_SECRET_KEY=${WEBUI_SECRET_KEY}
+      - ENABLE_PERSISTENT_CONFIG=${OPENWEBUI_ENABLE_PERSISTENT_CONFIG:-true}
+      - ENABLE_LOGIN_FORM=${OPENWEBUI_ENABLE_LOGIN_FORM:-true}
+      - ENABLE_SIGNUP=${OPENWEBUI_ENABLE_SIGNUP:-true}
+      - ENABLE_API_KEYS=${OPENWEBUI_ENABLE_API_KEYS:-true}
+      - ENABLE_OLLAMA_API=${OPENWEBUI_ENABLE_OLLAMA_API:-false}
+      - ENABLE_OPENAI_API=${OPENWEBUI_ENABLE_OPENAI_API:-true}
+      - OPENAI_API_BASE_URLS=${OPENWEBUI_OPENAI_API_BASE_URLS:-http://litellm:4000/v1}
+      - OPENAI_API_KEYS=${OPENWEBUI_OPENAI_API_KEYS:-sk-local}
+      - DEFAULT_MODELS=${OPENWEBUI_DEFAULT_MODEL:-qwen3.6-35b-heretic}
+      - DEFAULT_PINNED_MODELS=${OPENWEBUI_DEFAULT_MODEL:-qwen3.6-35b-heretic}
+      - DEFAULT_LOCALE=${OPENWEBUI_DEFAULT_LOCALE:-ru-RU}
+      - AUDIO_STT_ENGINE=${OPENWEBUI_AUDIO_STT_ENGINE:-openai}
+      - AUDIO_STT_MODEL=${OPENWEBUI_AUDIO_STT_MODEL:-stt-whisper-large-v3-turbo}
+      - AUDIO_STT_OPENAI_API_BASE_URL=${OPENWEBUI_AUDIO_API_BASE_URL:-http://litellm:4000/v1}
+      - AUDIO_STT_OPENAI_API_KEY=${OPENWEBUI_AUDIO_API_KEY:-sk-local}
+      - AUDIO_STT_SUPPORTED_CONTENT_TYPES=${OPENWEBUI_AUDIO_STT_CONTENT_TYPES:-audio/*,video/webm}
+      - AUDIO_TTS_ENGINE=${OPENWEBUI_AUDIO_TTS_ENGINE:-openai}
+      - AUDIO_TTS_MODEL=${OPENWEBUI_AUDIO_TTS_MODEL:-tts-qwen3-1.7b}
+      - AUDIO_TTS_VOICE=${OPENWEBUI_AUDIO_TTS_VOICE:-Aiden}
+      - AUDIO_TTS_OPENAI_API_BASE_URL=${OPENWEBUI_AUDIO_API_BASE_URL:-http://litellm:4000/v1}
+      - AUDIO_TTS_OPENAI_API_KEY=${OPENWEBUI_AUDIO_API_KEY:-sk-local}
+      - WEBUI_ADMIN_NAME=${OPENWEBUI_ADMIN_NAME:-OpenWebUI Admin}
+      - WEBUI_ADMIN_EMAIL=${OPENWEBUI_ADMIN_EMAIL:-}
+      - WEBUI_ADMIN_PASSWORD=${OPENWEBUI_ADMIN_PASSWORD:-}
+      # ── Web Search via SearXNG (compose.searxng.yml) ──
+      - ENABLE_RAG_WEB_SEARCH=${OPENWEBUI_ENABLE_WEB_SEARCH:-true}
+      - RAG_WEB_SEARCH_ENGINE=${OPENWEBUI_WEB_SEARCH_ENGINE:-searxng}
+      - "SEARXNG_QUERY_URL=${OPENWEBUI_SEARXNG_QUERY_URL:-http://searxng:8080/search?q=<query>&format=json}"
+      - RAG_WEB_SEARCH_RESULT_COUNT=${OPENWEBUI_WEB_SEARCH_RESULT_COUNT:-5}
+      - RAG_WEB_SEARCH_CONCURRENT_REQUESTS=${OPENWEBUI_WEB_SEARCH_CONCURRENT:-10}
+      # ── Code execution / interpreter via host-side Jupyter ──
+      - ENABLE_CODE_EXECUTION=${OPENWEBUI_ENABLE_CODE_EXECUTION:-true}
+      - CODE_EXECUTION_ENGINE=${OPENWEBUI_CODE_EXECUTION_ENGINE:-jupyter}
+      - CODE_EXECUTION_JUPYTER_URL=${OPENWEBUI_CODE_EXECUTION_JUPYTER_URL:-http://host.docker.internal:8888}
+      - CODE_EXECUTION_JUPYTER_AUTH=${OPENWEBUI_CODE_EXECUTION_JUPYTER_AUTH:-token}
+      - CODE_EXECUTION_JUPYTER_AUTH_TOKEN=${JUPYTER_TOKEN:-}
+      - CODE_EXECUTION_JUPYTER_TIMEOUT=${OPENWEBUI_CODE_EXECUTION_JUPYTER_TIMEOUT:-30}
+      - ENABLE_CODE_INTERPRETER=${OPENWEBUI_ENABLE_CODE_INTERPRETER:-true}
+      - CODE_INTERPRETER_ENGINE=${OPENWEBUI_CODE_INTERPRETER_ENGINE:-jupyter}
+      - CODE_INTERPRETER_JUPYTER_URL=${OPENWEBUI_CODE_INTERPRETER_JUPYTER_URL:-http://host.docker.internal:8888}
+      - CODE_INTERPRETER_JUPYTER_AUTH=${OPENWEBUI_CODE_INTERPRETER_JUPYTER_AUTH:-token}
+      - CODE_INTERPRETER_JUPYTER_AUTH_TOKEN=${JUPYTER_TOKEN:-}
+      - CODE_INTERPRETER_JUPYTER_TIMEOUT=${OPENWEBUI_CODE_INTERPRETER_JUPYTER_TIMEOUT:-30}
+      # ── External OpenAPI tool servers (shellbox) ──
+      # PersistentConfig: only seeded on the first boot of a fresh data volume;
+      # subsequent UI edits in Admin Panel → Tools take precedence and persist
+      # in openwebui-data-volume.
+      - TOOL_SERVER_CONNECTIONS=${OPENWEBUI_TOOL_SERVER_CONNECTIONS:-[]}
+      # ── Banners (used to surface the OpenHands UI link) ──
+      # Same PersistentConfig caveat: only seeded on first boot of a fresh
+      # data volume. Edit later via Admin Panel → Settings → Banners.
+      - WEBUI_BANNERS=${OPENWEBUI_BANNERS:-[]}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - openwebui_data:/app/backend/data
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health').read()"
+        ]
+      interval: 30s
+      timeout: 10s
+      retries: 10
+      start_period: 40s
+    networks:
+      - llm-net
+
+networks:
+  llm-net:
+    external: true
+    name: llm-stack-net
+
+volumes:
+  openwebui_data:
+    name: openwebui-data-volume

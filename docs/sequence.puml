@@ -1,0 +1,89 @@
+@startuml llm-stack-sequences
+title Agent-mesh: четыре сценария (Track 1, Track 2, MCP cross-call, cycle-guard)
+skinparam shadowing false
+skinparam defaultFontName "JetBrains Mono"
+skinparam sequenceMessageAlign center
+skinparam sequenceArrowThickness 1
+skinparam noteFontSize 11
+skinparam ParticipantPadding 8
+skinparam BoxPadding 6
+
+actor "Пользователь" as User
+participant "OpenWebUI\n:3000" as OW
+participant "LiteLLM\n:4000\n(callback=arize_phoenix,\nproject=qwen3.6-heretic)" as LL
+participant "clawcode-adapter\n:8790\nbearer\ncycle-guard" as CA
+participant "openhands-adapter\n:8791\nbearer\ncycle-guard" as OA
+participant "clawcode\n(docker exec claw)" as CC
+participant "openhands\nephemeral runtime-sandbox\n(docker run agent-server)" as OH
+participant "Phoenix\n:6006" as PHX
+
+== Сценарий 1 — Track 1: agent-as-tool через OpenWebUI ==
+
+User    -> OW   : «сделай <task> через Claw»
+OW      -> LL   : POST /v1/chat/completions\nmodel=qwen3.6-35b-heretic\ntools=[clawcode-adapter, openhands-adapter]
+LL      ->o PHX : start span (LiteLLM callback)
+LL      --> OW  : assistant.tool_calls=[{name:"run_clawcode", args:{task,...}}]
+OW      -> CA   : POST /v1/run\nAuthorization: Bearer $CLAWCODE_ADAPTER_API_KEY\nX-Agent-Mesh-Depth: 0
+note right of CA: depth=0+1=1\n1 ≤ MAX_NESTED_AGENT_CALLS (=1) → OK
+CA      ->o PHX : start span (agent_mesh.run.clawcode, depth=1)
+CA      -> CC   : docker exec clawcode claw\n--output-format json prompt "<task>"
+CC      --> CA  : JSONL events:\ntool_use → message → assistant → done
+CA      ->x PHX : end span (run.ok=true)
+CA      --> OW  : 200 OK\n{result_text, files_changed, exit_code, depth=1}\nX-Agent-Mesh-Depth: 1
+OW      -> LL   : POST /v1/chat/completions\n(continue with tool result)
+LL      ->o PHX : continue span (tool result)
+LL      --> OW  : assistant.message (final answer)
+OW      --> User: финальный ответ + diff
+LL      ->x PHX : end span
+
+== Сценарий 2 — Track 2: LiteLLM A2A через alias agent/clawcode ==
+
+User    -> OW   : выбран model=agent/clawcode
+OW      -> LL   : POST /v1/chat/completions\nmodel=agent/clawcode\nmessages=[{role:user,content:"<task>"}]
+LL      ->o PHX : start span (model=agent/clawcode,\ntraceparent propagated to adapter)
+LL      -> CA   : POST /v1/chat/completions\n(LiteLLM A2A → adapter; общий traceparent)
+note right of CA: depth header=0+1=1\nто же `MAX_NESTED_AGENT_CALLS`
+CA      -> CC   : docker exec clawcode claw\nprompt "<task>"
+CC      --> CA  : JSONL events
+CA      --> LL  : 200 OK (assistant.message,\nили обёрнутый result_text)
+LL      --> OW  : assistant.message
+OW      --> User: финальный ответ
+LL      ->x PHX : end span\n(Track 1 + Track 2 живут\nв одном проекте qwen3.6-heretic)
+
+== Сценарий 3 — MCP cross-call: Claw → OpenHands ==
+
+User    -> CC   : `docker exec -it clawcode claw`\n«создай from-claw.txt через OpenHands»
+note over CC
+  В .env.clawcode:
+  CLAWCODE_MCP_SERVERS=[searchbox, openhands-adapter]
+  собственный clawcode-adapter ОТСУТСТВУЕТ.
+end note
+CC      -> OA   : MCP SSE → tool `run_openhands`\n(task="создай from-claw.txt")\nX-Agent-Mesh-Depth: 0 (Claw — корень цепочки)
+OA      ->o PHX : start span (agent_mesh.run.openhands, depth=1)
+OA      -> OH   : openhands --headless --json -t "<task>"\n(spawn ephemeral sandbox via docker.sock)
+OH      --> OA  : JSON events: file write, plan, finish\nfrom-claw.txt создан в ${HOME}/agent_dev
+OA      ->x PHX : end span (run.ok=true)
+OA      --> CC  : MCP result (JSONL)\n{result_text, files_changed:[from-claw.txt], depth=1}
+CC      --> User: «готово, создал from-claw.txt»
+
+== Сценарий 4 — Cycle-guard: depth=1 → adapter инкрементирует → 429 ==
+
+actor "Эксплуатация (curl)" as Curl
+Curl    -> CA   : POST /v1/run\nAuthorization: Bearer $CLAWCODE_ADAPTER_API_KEY\nX-Agent-Mesh-Depth: 1\n(симуляция вложенного вызова)
+note right of CA
+  parsed depth = 1
+  outgoing depth = 1 + 1 = 2
+  MAX_NESTED_AGENT_CALLS = 1
+  2 > 1 → отказ
+end note
+CA      --> Curl: HTTP 429 Too Many Requests\nresponse header X-Agent-Mesh-Depth: 2\nbody {"detail":"agent-mesh nesting limit\nexceeded: incoming depth=1,\nmax_nested_agent_calls=1. Refusing\nto delegate further to avoid\nrecursive loops."}
+
+note over CA, OA
+  То же поведение в openhands-adapter.
+  middleware MeshDepthEchoMiddleware добавляет
+  X-Agent-Mesh-Depth: incoming+1 во все ответы
+  (включая 429), поэтому отладчик сразу видит
+  глубину, на которой произошёл отказ.
+end note
+
+@enduml

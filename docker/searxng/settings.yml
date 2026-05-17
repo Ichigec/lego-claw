@@ -1,0 +1,77 @@
+# SearXNG settings for the local OpenWebUI integration.
+#
+# Critical bits for OpenWebUI:
+#   - search.formats must include `json` (default upstream is HTML only).
+#   - server.limiter must be off so the JSON API does not 429 on bursts.
+#   - server.secret_key is taken from the SEARXNG_SECRET env var (compose injects it).
+#   - redis.url points at the sidecar valkey/redis container.
+#
+# Engines block enables a small set of metasearch backends that work well
+# without API keys. DuckDuckGo is intentionally muted because of aggressive
+# rate-limits that break the OpenWebUI UX.
+
+use_default_settings: true
+
+general:
+  instance_name: "OpenWebUI SearXNG"
+  privacypolicy_url: false
+  donation_url: false
+  contact_url: false
+  enable_metrics: false
+
+server:
+  base_url: false
+  # Placeholder — the upstream searxng/searxng entrypoint replaces this string
+  # with the value of $SEARXNG_SECRET on every container start.
+  secret_key: "ultrasecretkey"
+  limiter: false
+  public_instance: false
+  image_proxy: false
+  http_protocol_version: "1.0"
+  method: "GET"
+  default_locale: "ru"
+
+ui:
+  default_locale: "ru"
+  query_in_title: true
+  infinite_scroll: false
+  center_alignment: false
+  cache_url: ""
+  default_theme: simple
+  theme_args:
+    simple_style: auto
+
+search:
+  safe_search: 0
+  autocomplete: ""
+  default_lang: "ru"
+  formats:
+    - html
+    - json
+
+redis:
+  url: redis://searxng-redis:6379/0
+
+outgoing:
+  request_timeout: 5.0
+  max_request_timeout: 15.0
+  pool_connections: 100
+  pool_maxsize: 20
+
+engines:
+  - name: google
+    disabled: false
+  - name: bing
+    disabled: false
+  - name: duckduckgo
+    disabled: true
+  - name: wikipedia
+    disabled: false
+  - name: wikidata
+    disabled: false
+  - name: github
+    disabled: false
+  - name: stackoverflow
+    disabled: false
+  - name: arxiv
+    disabled: false

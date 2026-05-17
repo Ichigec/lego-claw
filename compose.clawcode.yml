@@ -1,0 +1,61 @@
+services:
+  clawcode:
+    # Image tag follows the OpenHands precedent: ${SERVICE}_IMAGE in
+    # .env.clawcode points at a local build by default; CI / supply-chain
+    # audit pins CLAWCODE_GIT_REF to a known SHA.
+    image: ${CLAWCODE_IMAGE:-voice-assistant-clawcode:local}
+    container_name: clawcode
+    restart: "no"           # interactive CLI; no auto-restart
+    pull_policy: never      # we always build locally for SHA reproducibility
+    build:
+      context: ./docker/clawcode
+      dockerfile: Dockerfile
+      args:
+        CLAWCODE_GIT_REPO: ${CLAWCODE_GIT_REPO:-https://github.com/instructkr/claw-code.git}
+        CLAWCODE_GIT_REF:  ${CLAWCODE_GIT_REF:-main}
+    # Keep STDIN/TTY for interactive CLI sessions (`docker exec -it ...`).
+    stdin_open: true
+    tty: true
+    init: true
+    # Claw Code does NOT need docker.sock (unlike OpenHands). The runtime
+    # is in-process and edits the workspace directly via the bind-mount.
+    user: "${CLAWCODE_USER_UID:-10101}:${CLAWCODE_USER_GID:-10101}"
+    working_dir: /workspace/project
+    environment:
+      # Resolve `src` package from /app; avoid shadowing stdlib `types` (see Dockerfile).
+      - PYTHONPATH=/app
+      # ── LLM via shared LiteLLM gateway ───────────────────────────────────
+      - OPENAI_API_BASE=${CLAWCODE_LITELLM_BASE_URL:-http://litellm:4000/v1}
+      # Rust `claw` reads OPENAI_BASE_URL (OpenAI-compat); keep in sync with OPENAI_API_BASE.
+      - OPENAI_BASE_URL=${CLAWCODE_LITELLM_BASE_URL:-http://litellm:4000/v1}
+      - OPENAI_API_KEY=${CLAWCODE_LITELLM_API_KEY:-${LITELLM_API_KEY:-sk-local}}
+      - LLM_MODEL=${CLAWCODE_DEFAULT_MODEL:-openai/qwen3.6-35b-heretic}
+      # ── State ────────────────────────────────────────────────────────────
+      - CLAWCODE_HOME=/.clawcode
+      # ── MCP servers — JSON config consumed by Claw Code at startup ───────
+      # Default: the local searchbox SSE on llm-stack-net.
+      - MCP_SERVERS=${CLAWCODE_MCP_SERVERS:-[{"name":"searchbox","type":"sse","url":"http://searchbox:8090/sse"}]}
+    volumes:
+      # Shared agent sandbox (same path as fsbox / OpenHands so all three
+      # agents see one tree).
+      - ${CLAWCODE_WORKSPACE_DIR:-${HOME}/agent_dev}:/workspace/project:rw
+      # Persistent state for sessions / token caches; lives outside repo.
+      - ${CLAWCODE_STATE_DIR:-${HOME}/.clawcode}:/.clawcode:rw
+      # Shared `.ai/` skills tree — same path the adapters mount it at, so
+      # AGENTS.md / router.md / skills/<id>/SKILL.md resolve to the same
+      # files whether the agent runs interactively (this container) or
+      # headless via `clawcode-adapter`. Read-only — `skills-manager` is the
+      # sole writer.
+      - ${CLAWCODE_SKILLS_DIR:-./.ai}:/workspace/project/.ai:ro
+    networks:
+      - llm-net
+    # Make the sidecar idle in the background so `docker exec -it clawcode
+    # python -m src.main` from clawcode-start.sh can attach later.
+    # `tail -f /dev/null` is a 5KB shell process that keeps PID 1 alive
+    # without spawning the agent until the user explicitly does so.
+    command: ["tail", "-f", "/dev/null"]
+
+networks:
+  llm-net:
+    external: true
+    name: llm-stack-net

@@ -1,0 +1,50 @@
+services:
+  fsbox:
+    build:
+      context: ./docker/fsbox
+      dockerfile: Dockerfile
+    image: openwebui-fsbox:local
+    container_name: fsbox
+    restart: unless-stopped
+    # uid/gid 1000:1000 = первый non-root юзер хоста; файлы, которые agent
+    # пишет в ${HOME}/agent_dev, остаются owned этим юзером без chown.
+    # Если ваш юзер с другим uid/gid — переопределите через FSBOX_USER_UID/GID
+    # (либо просто отредактируйте строку ниже).
+    user: "${FSBOX_USER_UID:-1000}:${FSBOX_USER_GID:-1000}"
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - "no-new-privileges:true"
+    pids_limit: 64
+    mem_limit: 256m
+    memswap_limit: 256m
+    cpus: 1.0
+    tmpfs:
+      - /tmp:size=64m,exec
+      - /home/agent:size=8m,exec
+    environment:
+      - FSBOX_PORT=8001
+      - MCPO_API_KEY=${FSBOX_API_KEY:?FSBOX_API_KEY must be set in .env.openwebui}
+    volumes:
+      # The ONLY rw-mount: agent edits land here, IDE sees them as the host user.
+      - ${FSBOX_WORKSPACE_DIR:-${HOME}/agent_dev}:/workspace:rw
+    ports:
+      # Loopback only — OpenWebUI uses the docker-network DNS name `fsbox`.
+      - "127.0.0.1:${FSBOX_HOST_PORT:-8002}:8001"
+    healthcheck:
+      # Double-dollar prevents compose host-shell substitution; the literal
+      # `$MCPO_API_KEY` is then expanded inside the container at runtime.
+      test:
+        - CMD-SHELL
+        - 'curl -fsS -m 3 -H "Authorization: Bearer $$MCPO_API_KEY" http://127.0.0.1:8001/openapi.json >/dev/null'
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    networks: [llm-net]
+
+networks:
+  llm-net:
+    external: true
+    name: llm-stack-net

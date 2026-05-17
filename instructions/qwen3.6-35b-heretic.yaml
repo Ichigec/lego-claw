@@ -1,0 +1,8 @@
+# ARCHIVED 2026-04-21: LocalAI больше не держит qwen3.6-35b-heretic.
+# Теперь модель обслуживает llama-server (compose.llama.yml) под llama.cpp, а LiteLLM
+# проксирует трафик и шлёт трейсы в Phoenix. LocalAI оставлен только под ASR/TTS/VAD.
+#
+# Файл сохранён для истории/быстрого отката. Чтобы восстановить обслуживание через LocalAI,
+# верните валидный YAML (см. git history).
+archived: true
+reason: "served by llama.cpp via LiteLLM; see compose.llama.yml + compose.phoenix.yml"

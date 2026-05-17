@@ -1,0 +1,154 @@
+@startuml llm-stack-architecture
+title LLM-стек: agent-mesh (Track 1 + Track 2) поверх LiteLLM/Phoenix
+skinparam componentStyle rectangle
+skinparam shadowing false
+skinparam defaultFontName "JetBrains Mono"
+skinparam ArrowColor #444
+skinparam rectangle {
+  BackgroundColor<<client>>    #EAF4FF
+  BackgroundColor<<gateway>>   #FFF4E0
+  BackgroundColor<<mesh>>      #FFE9E0
+  BackgroundColor<<agent>>     #FFF7CC
+  BackgroundColor<<infer>>     #E8F7EC
+  BackgroundColor<<tools>>     #E0F5FF
+  BackgroundColor<<obs>>       #F3E8FF
+  BackgroundColor<<data>>      #F0F0F0
+}
+
+' ============== CLIENTS / UI / CLI ==============
+rectangle "Клиенты (UI / CLI / smoke)" <<client>> {
+  component "OpenWebUI (UI)\n:3000\nmodel=qwen3.6-35b-heretic"            as OpenWebUI
+  component "OpenHands (UI)\n:3300\n(`openhands-start.sh`)"               as OpenHandsUI
+  component "opencode Web UI\n:3400\n(`opencode-start.sh --web`)"         as OpencodeUI
+  component "Claw REPL\n`docker exec -it clawcode claw`"                  as ClawREPL
+  component "curl / smoke\n`stack-smoke.sh`\n`agent-mesh-demo-ru.sh`"     as Curl
+}
+
+' ============== GATEWAY ==============
+rectangle "Шлюз\n(docker network: llm-stack-net)" <<gateway>> {
+  component "LiteLLM Proxy\n:4000 /v1\nmaster_key=sk-local\nSTORE_MODEL_IN_DB=True\nsuccess_callback=arize_phoenix\nproject=qwen3.6-heretic" as LiteLLM
+  component "openai-stack-relay\n:8088\n(pattern-B демо;\nалиас stack-openai-relay-qwen36)" as Relay
+}
+
+' ============== AGENT-MESH ADAPTERS ==============
+rectangle "Agent-mesh adapters\n(compose.agents-mesh.yml)" <<mesh>> {
+  component "clawcode-adapter\n:8790 (llm-stack-net)\n+ 127.0.0.1:8790 loopback\nbearer auth\nX-Agent-Mesh-Depth\nMAX_NESTED_AGENT_CALLS"   as ClawAdapter
+  component "openhands-adapter\n:8791 (llm-stack-net)\n+ 127.0.0.1:8791 loopback\nbearer auth\nX-Agent-Mesh-Depth\nMAX_NESTED_AGENT_CALLS" as OHAdapter
+}
+
+' ============== HEADLESS AGENTS ==============
+rectangle "Headless агенты" <<agent>> {
+  component "clawcode container\n(compose.clawcode.yml)\nshared sandbox\n${HOME}/agent_dev"      as ClawCtr
+  component "openhands GUI app\n(compose.openhands.yml)\n+ ephemeral runtime-sandbox\n(docker.sock spawn)" as OHCtr
+}
+
+' ============== INFERENCE / PROVIDERS ==============
+rectangle "Inference / Providers" <<infer>> {
+  component "host llama.cpp\n:8090 /v1\nqwen3.6-35b-heretic (default chat)"                          as LlamaCpp
+  component "LM Studio host\n:1234 /v1\n(LMSTUDIO_API_BASE,\n~17 passthrough алиасов)"               as LMStudio
+  component "vLLM host\n:8000 /v1\n(gemma-4-26B-lowmem)"                                             as VLLM
+  component "LocalAI :8180\nstt-whisper-large-v3-turbo\ntts-qwen3-1.7b\nvad-silero"                  as LocalAI
+}
+
+' ============== TOOLS / MCP ==============
+rectangle "Tool-серверы / MCP" <<tools>> {
+  component "searchbox\nmcpo OpenAPI :8001\nnative MCP HTTP/SSE :8090"                  as Searchbox
+  component "shellbox :8001\n(read-only shell, ALLOW_COMMANDS)"                          as Shellbox
+  component "fsbox :8002\n(rw FS, ${HOME}/agent_dev)"                                as Fsbox
+  component "SearXNG :8080\n+ Valkey"                                                    as SearXNG
+}
+
+' ============== OBSERVABILITY ==============
+rectangle "Observability" <<obs>> {
+  component "Phoenix\nUI :6006\nOTLP/gRPC :4317\nOTLP/HTTP :4318→6006\nproject=qwen3.6-heretic" as Phoenix
+  database  "Postgres\nphoenix-db\n(spans + projects)"  as PhoenixDB
+  database  "Postgres\nlitellm-db\n(model registry + logs)" as LiteLLMDB
+}
+
+' ============== DATA ==============
+rectangle "Данные / state на хосте" <<data>> {
+  folder "shared agent sandbox\n${HOME}/agent_dev\n(fsbox / clawcode / openhands)" as Sandbox
+  folder "Claw state\n${HOME}/.clawcode" as ClawState
+  folder "OpenHands state\n${HOME}/.openhands" as OHState
+  folder "LM Studio models\n(GGUF, ro bind-mount)" as Models
+}
+
+' ============== FLOWS — chat (OpenAI /v1) ==============
+OpenWebUI -[#0A7]-> LiteLLM   : 1. POST /v1/chat/completions\n   GET /v1/models
+OpencodeUI -[#0A7]-> LiteLLM  : 1. POST /v1/chat/completions
+OpenHandsUI -[#0A7]-> LiteLLM : 1. POST /v1/chat/completions\n   (host.docker.internal:4000\n   из runtime-sandbox)
+ClawREPL  -[#0A7]-> LiteLLM   : 1. POST /v1/chat/completions
+Curl      -[#0A7]-> LiteLLM   : 1. POST /v1/chat/completions
+
+LiteLLM -[#0A7]-> LlamaCpp     : alias qwen3.6-35b-heretic\n   (default chat)
+LiteLLM -[#0A7]-> LMStudio     : passthrough алиасы\n   (~17, через LMSTUDIO_API_BASE)
+LiteLLM -[#0A7]-> VLLM         : alias gemma-4-26B-lowmem
+LiteLLM -[#0A7]-> Relay        : alias stack-openai-relay-qwen36
+Relay   -[#0A7]-> LiteLLM      : echo через openai/qwen3.6-35b-heretic\n   (pattern-B демо)
+LlamaCpp .[#0A7].> Models      : mmap GGUF
+
+' ============== FLOWS — audio ==============
+OpenWebUI -[#E67]-> LiteLLM   : /v1/audio/* (STT/TTS)
+LiteLLM   -[#E67]-> LocalAI   : ASR / TTS
+OpenWebUI -[#E67]-> LocalAI   : VAD direct (LiteLLM не прокси)
+
+' ============== FLOWS — agent-mesh (Track 1 + Track 2) ==============
+OpenWebUI -[#D27]-> ClawAdapter  : Track 1: tool-call →\n   POST /v1/run\n   bearer + X-Agent-Mesh-Depth:0
+OpenWebUI -[#D27]-> OHAdapter    : Track 1: tool-call →\n   POST /v1/run
+
+LiteLLM -[#D27]-> ClawAdapter    : Track 2: alias agent/clawcode\n   (LiteLLM A2A beta)
+LiteLLM -[#D27]-> OHAdapter      : Track 2: alias agent/openhands
+
+ClawAdapter -[#D27]-> ClawCtr    : docker exec clawcode claw\n   --output-format json prompt
+OHAdapter   -[#D27]-> OHCtr      : openhands --headless --json -t\n   (spawn ephemeral runtime-sandbox)
+
+' Cross-wiring MCP (cycle-guard: каждый видит ЧУЖОГО, не себя)
+ClawCtr -[#D27]-> OHAdapter      : MCP SSE /sse\n   (agent видит соседа, НЕ себя)
+OHCtr   -[#D27]-> ClawAdapter    : MCP SSE через\n   host.docker.internal:8790
+ClawCtr -[#D27]-> Searchbox      : MCP SSE /sse (свой searchbox)
+OHCtr   -[#D27]-> Searchbox      : MCP SSE через host.docker.internal
+
+' Docker socket для агент-операций (RW обусловлен docker exec / docker run)
+ClawAdapter ..> Sandbox : /var/run/docker.sock\n   (docker exec)
+OHAdapter   ..> Sandbox : /var/run/docker.sock\n   (docker run sandbox)
+ClawCtr  --> Sandbox    : bind-mount rw
+OHCtr    --> Sandbox    : bind-mount rw
+Fsbox    --> Sandbox    : bind-mount rw
+ClawCtr  --> ClawState  : persistent /.clawcode
+OHCtr    --> OHState    : persistent /.openhands
+
+' ============== FLOWS — tools (классические) ==============
+OpenWebUI -[#0A7]-> Searchbox    : OpenAPI :8001 (mcpo)
+OpenWebUI -[#0A7]-> Shellbox     : OpenAPI :8001
+OpenWebUI -[#0A7]-> Fsbox        : OpenAPI :8002
+Searchbox -[#0A7]-> SearXNG      : web search backend
+LiteLLM   -[#0A7]-> Searchbox    : MCP gateway\n   litellm_proxy/mcp/searchbox
+
+' ============== FLOWS — OTLP (трейсы) ==============
+LiteLLM     .[#93C]u.> Phoenix : arize_phoenix callback\n   project=qwen3.6-heretic
+ClawAdapter .[#93C]u.> Phoenix : OTLP/HTTP /v1/traces\n   project=qwen3.6-heretic
+OHAdapter   .[#93C]u.> Phoenix : OTLP/HTTP /v1/traces
+Phoenix     -[#93C]-> PhoenixDB : persist spans
+LiteLLM     -[#555]-> LiteLLMDB : model registry / logs
+
+' ============== Human ==============
+actor "Разработчик" as Dev
+Dev -[#555]-> OpenWebUI   : http://localhost:3000
+Dev -[#555]-> OpencodeUI  : http://localhost:3400
+Dev -[#555]-> OpenHandsUI : http://localhost:3300
+Dev -[#555]-> ClawREPL    : docker exec -it clawcode claw
+Dev -[#555]-> Phoenix     : http://localhost:6006\n(трейсы, токены, латентность)
+Dev -[#555]-> Curl        : agent-mesh-demo-ru.sh, stack-smoke.sh
+
+legend right
+  |= Цвет |= Тип потока |
+  |<#0A7>  ██ | OpenAI /v1 (chat / completions / embeddings) |
+  |<#E67>  ██ | Аудио: ASR / TTS / VAD |
+  |<#D27>  ██ | Agent-mesh: POST /v1/run, MCP SSE, A2A через alias |
+  |<#93C>  ██ | OTLP-трейсы (LiteLLM callback + adapter spans) |
+  |<#555>  ██ | Человек / CLI / persisted state |
+  ----
+  Cycle-guard: incoming X-Agent-Mesh-Depth=N → adapter\nувеличивает до N+1; при N+1 > MAX_NESTED_AGENT_CALLS\n→ HTTP 429 с echo-заголовком X-Agent-Mesh-Depth.\nMAX_NESTED_AGENT_CALLS=1 в .env по умолчанию.\n\nBearer-auth: CLAWCODE_ADAPTER_API_KEY,\nOPENHANDS_ADAPTER_API_KEY (поднимаются в .env;\nLiteLLM A2A использует master_key=sk-local на edge).\n\nMCP cross-wiring (cycle-guard на конфиг-уровне):\n• Claw видит searchbox + openhands-adapter\n• OpenHands видит searchbox + clawcode-adapter\n• никто не видит свой собственный адаптер.
+endlegend
+
+@enduml
