@@ -12,9 +12,10 @@
 #
 # Run from the project root:
 #   bash opencode-start.sh              # build (if needed) + start + interactive TUI
-#   bash opencode-start.sh --no-attach  # bring container up but skip exec
-#   bash opencode-start.sh --web        # bring container up + start web UI on :3400
-#                                       # (implies --no-attach; URL printed at the end)
+#   bash opencode-start.sh --no-attach  # bring container up + start web UI on :3400
+#                                       # (skip TUI; web URL printed at the end)
+#   bash opencode-start.sh --web        # alias of --no-attach (kept for compatibility)
+#   bash opencode-start.sh --no-web     # container only, no TUI, no web (CI / agent-mesh)
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -23,25 +24,34 @@ ENV_OVERRIDE_FILE="${ENV_OVERRIDE_FILE:-$SCRIPT_DIR/.env.opencode}"
 COMPOSE_FILE="$SCRIPT_DIR/compose.opencode.yml"
 
 ATTACH=1
-WEB=0
+WEB=auto   # auto = on whenever ATTACH=0; force on with --web; off with --no-web
 for arg in "$@"; do
     case "$arg" in
         --no-attach) ATTACH=0 ;;
-        --web) WEB=1; ATTACH=0 ;;
+        --web)       WEB=1; ATTACH=0 ;;
+        --no-web)    WEB=0; ATTACH=0 ;;
         -h|--help)
             cat <<USAGE
-Usage: bash $0 [--no-attach | --web]
+Usage: bash $0 [--no-attach | --web | --no-web]
   (no args)    build (if needed) + start + drop into interactive TUI
-  --no-attach  bring container up but skip exec (good for CI / agent-mesh)
-  --web        bring container up + launch 'opencode web' UI in background
-               on http://127.0.0.1:\${OPENCODE_WEB_HOST_PORT:-3400}
-               (implies --no-attach; equivalent to
-                opencode-start.sh --no-attach && opencode-web-start.sh)
+  --no-attach  bring container up + start web UI on
+               http://127.0.0.1:\${OPENCODE_WEB_HOST_PORT:-3400} in background
+               (no TUI; equivalent to opencode-start.sh --web)
+  --web        alias of --no-attach (kept for backwards compat)
+  --no-web     bring container up only — no TUI, no web UI
+               (CI / agent-mesh: nobody on the host needs the browser UI,
+                opencode-adapter still talks to the container via 'docker
+                exec opencode opencode acp')
 USAGE
             exit 0
             ;;
     esac
 done
+
+# Resolve auto: --no-attach implies web by default. Explicit --no-web wins.
+if [ "$WEB" = "auto" ]; then
+    if [ "$ATTACH" = "0" ]; then WEB=1; else WEB=0; fi
+fi
 
 _OC_ENV_KEYS=(
     OPENCODE_COMPOSE_PROJECT
@@ -174,22 +184,32 @@ mkdir -p "$OPENCODE_WORKSPACE_DIR"
 mkdir -p "$OPENCODE_STATE_DIR"
 
 # ── 5.5 ACL — uid контейнера = OPENCODE_USER_UID; даём ему rwx ────────────
+# Workspace и state-dir bind-mount'ятся как есть, поэтому inside-container
+# uid 10102 должен иметь rwx на оба. setfacl работает без root (хост-юзер
+# уже владеет директорией). chown нам недоступен из-под обычного юзера —
+# не пытаемся (раньше падали на sudo -n).
 if command -v setfacl >/dev/null 2>&1; then
-    if setfacl -R \
+    _oc_acl_target() {
+        local dir="$1"
+        setfacl -R \
             -m "u:${OPENCODE_USER_UID}:rwx,g:${OPENCODE_USER_GID}:rwx" \
-            "$OPENCODE_WORKSPACE_DIR" 2>/dev/null \
-       && setfacl -R -d \
+            "$dir" 2>/dev/null \
+        && setfacl -R -d \
             -m "u:${OPENCODE_USER_UID}:rwx,g:${OPENCODE_USER_GID}:rwx,u:1000:rwx,g:1000:rwx" \
-            "$OPENCODE_WORKSPACE_DIR" 2>/dev/null; then
+            "$dir" 2>/dev/null
+    }
+    if _oc_acl_target "$OPENCODE_WORKSPACE_DIR"; then
         ok "ACL применён к $OPENCODE_WORKSPACE_DIR (uid=${OPENCODE_USER_UID})"
     else
-        warn "setfacl не сработал — opencode может не записать в $OPENCODE_WORKSPACE_DIR"
+        warn "setfacl не сработал на $OPENCODE_WORKSPACE_DIR — opencode может не записать туда"
     fi
-    chown -R "${OPENCODE_USER_UID}:${OPENCODE_USER_GID}" "$OPENCODE_STATE_DIR" 2>/dev/null \
-        || sudo -n chown -R "${OPENCODE_USER_UID}:${OPENCODE_USER_GID}" "$OPENCODE_STATE_DIR" 2>/dev/null \
-        || warn "не получилось установить владельца на $OPENCODE_STATE_DIR (попробуйте вручную: sudo chown -R ${OPENCODE_USER_UID}:${OPENCODE_USER_GID} $OPENCODE_STATE_DIR)"
+    if _oc_acl_target "$OPENCODE_STATE_DIR"; then
+        ok "ACL применён к $OPENCODE_STATE_DIR (uid=${OPENCODE_USER_UID})"
+    else
+        warn "setfacl не сработал на $OPENCODE_STATE_DIR — opencode не сможет писать /.opencode/web.log и т.п."
+    fi
 else
-    warn "setfacl не установлен (sudo apt-get install -y acl)."
+    warn "setfacl не установлен (sudo apt-get install -y acl). Без ACL opencode (uid ${OPENCODE_USER_UID}) не сможет писать в $OPENCODE_STATE_DIR."
 fi
 
 # ── 6. Build + start ───────────────────────────────────────────────────────
@@ -208,7 +228,17 @@ for i in {1..30}; do
     [ "$i" = 30 ] && die "Контейнер opencode не стал running за 30s — см. docker logs opencode"
 done
 
-# ── 8. Summary + optional interactive attach ───────────────────────────────
+# ── 8. Web UI (по умолчанию для --no-attach) ──────────────────────────────
+if [ "$WEB" = "1" ]; then
+    echo ""
+    echo "→ Поднимаю opencode web UI (на хосте: http://127.0.0.1:${OPENCODE_WEB_HOST_PORT:-3400})…"
+    if ! bash "$SCRIPT_DIR/opencode-web-start.sh"; then
+        warn "opencode web UI не запустился — см. docker exec opencode tail -f /.opencode/web.log"
+        warn "Контейнер живой, ACP-bridge для opencode-adapter работает; повторить вручную: bash $SCRIPT_DIR/opencode-web-start.sh --restart"
+    fi
+fi
+
+# ── 9. Summary + optional interactive attach ──────────────────────────────
 cat <<EOF
 
 ==========================================
@@ -219,18 +249,24 @@ cat <<EOF
  Workspace:           $OPENCODE_WORKSPACE_DIR (внутри: /workspace/project)
  State:               $OPENCODE_STATE_DIR (внутри: /.opencode)
  MCP servers:         ${OPENCODE_MCP_SERVERS:-[]}
+EOF
 
- Опц. web-UI:         bash $SCRIPT_DIR/opencode-web-start.sh
+if [ "$WEB" = "1" ]; then
+    cat <<EOF
+ Web UI:              http://127.0.0.1:${OPENCODE_WEB_HOST_PORT:-3400}
+                      (логи: docker exec opencode tail -f /.opencode/web.log)
+EOF
+else
+    cat <<EOF
+ Web UI:              отключён (--no-web). Поднять отдельно: bash $SCRIPT_DIR/opencode-web-start.sh
+EOF
+fi
+
+cat <<EOF
  Остановить:          bash $SCRIPT_DIR/opencode-stop.sh
  Smoke (headless):    bash $SCRIPT_DIR/opencode-demo-ru.sh
 ==========================================
 EOF
-
-if [ "$WEB" = "1" ]; then
-    echo ""
-    echo "→ Запускаю opencode web UI (на хосте: http://127.0.0.1:${OPENCODE_WEB_HOST_PORT:-3400})…"
-    exec bash "$SCRIPT_DIR/opencode-web-start.sh"
-fi
 
 if [ "$ATTACH" = "1" ]; then
     echo ""

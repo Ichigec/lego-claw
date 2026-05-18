@@ -136,7 +136,7 @@ bash stack-start.sh
 | --- | --- | --- |
 | Phoenix + Postgres | :6006, internal :5432 | OTLP-трейсы LiteLLM |
 | LiteLLM + Postgres | :4000 | OpenAI-совместимый шлюз |
-| openai-stack-relay | :8088 (опц.) | Pattern-B демо для agent-mesh |
+| openai-stack-relay | :8089 (опц.) | Pattern-B демо для agent-mesh (loopback) |
 | LocalAI | :8180 (если GPU) | ASR / TTS / VAD |
 | OpenWebUI | :3000 | UI чата |
 | SearXNG | :8081 | Meta-поиск |
@@ -155,8 +155,94 @@ bash stack-start.sh
 bash openhands-start.sh           # OpenHands GUI на :3300
 bash opencode-start.sh --web      # opencode + web UI на :3400
 bash clawcode-start.sh            # Claw Code (TUI) — interactive exec
+bash dify-start.sh                # Dify (visual workflow builder) на :8090
 bash llamacpp-host-start.sh       # host llama.cpp на :8090 (если GGUF готов)
 bash jupyter-host-start.sh        # host Jupyter на :8888 (Code Interpreter)
+```
+
+> **Конфликт портов**: Dify nginx и host llama.cpp по умолчанию слушают
+> один и тот же `:8090`. Поднимаете оба — задайте `DIFY_HOST_PORT=8095`
+> в `.env.dify` или `LLAMA_CPP_HOST_PORT=8091` в `.env.llamacpp`.
+
+### Опциональные кубики → Dify (visual workflow builder)
+
+[Dify](https://github.com/langgenius/dify) — no-code конструктор
+LLM-приложений. В нашем стеке он включён как опциональный кубик: даёт
+не-программистам возможность собирать визуальные workflow'ы поверх
+**нашей** локальной LiteLLM и agent-mesh адаптеров (Claw Code,
+OpenHands, opencode).
+
+#### Как это работает
+
+```mermaid
+flowchart LR
+    User --> DifyUI["Dify UI :8090"]
+    DifyUI --> DifyAPI["Dify api"]
+    DifyAPI -->|Custom OpenAI provider| LiteLLM["LiteLLM :4000"]
+    DifyAPI -.->|Custom Tool OpenAPI| ClawAdapter["clawcode-adapter :8790"]
+    DifyAPI -.->|Custom Tool OpenAPI| OpenHandsAdapter["openhands-adapter :8791"]
+    DifyAPI -.->|Custom Tool OpenAPI| OpencodeAdapter["opencode-adapter :8798"]
+```
+
+Dify api/worker подключаются к нашей сети `llm-stack-net` через
+override-файл `compose.dify.yml`, поэтому могут резолвить
+`http://litellm:4000`, `http://clawcode-adapter:8790` и т.д. напрямую
+по compose-DNS.
+
+#### Пошагово
+
+1. **Поднять основной стек** (если ещё нет):
+   ```bash
+   bash stack-start.sh
+   ```
+
+2. **Поднять Dify**:
+   ```bash
+   bash dify-start.sh
+   ```
+   Скрипт сам создаст `dify/docker/.env` из upstream-шаблона при
+   первом запуске. На GB10/Spark первое поднятие = ~3 мин на pull
+   ~6 GB образов (api, web, weaviate, sandbox, plugin_daemon,
+   ssrf_proxy, redis, postgres, nginx).
+
+3. **Создать админа Dify**: откройте http://localhost:8090, форма
+   `/install` запросит email + пароль. Оба значения
+   сохраните — пригодятся для авто-регистрации.
+
+4. **Получить Console-token Dify** (нужен скриптам авто-регистрации):
+   - Settings → Profile → API Keys → **Create new** → скопируйте.
+   - Сохраните в `.env.dify`:
+     ```bash
+     cp .env.dify.example .env.dify
+     # Открыть .env.dify, вставить:
+     # DIFY_CONSOLE_TOKEN=app-XXXXXXXX...
+     ```
+
+5. **Зарегистрировать LiteLLM как model provider**:
+   ```bash
+   bash scripts/dify-register-litellm.sh
+   ```
+   После этого в любой LLM-node Dify Studio будет доступна модель
+   `qwen3.6-35b-heretic` с base URL `http://litellm:4000/v1`.
+
+6. **Зарегистрировать 3 наших адаптера как Custom Tools**:
+   ```bash
+   bash scripts/dify-register-agent-mesh.sh
+   ```
+   В Studio → Tools → Custom появятся 3 кубика
+   (`agent-mesh-clawcode`, `agent-mesh-openhands`, `agent-mesh-opencode`).
+   Их можно перетащить в любой workflow.
+
+7. **(Опц.) Импортировать пример workflow**:
+   - Studio → Create from DSL → Import →
+     `examples/dify-workflow-agent-mesh.yml`.
+   - Получится готовый workflow «локальный LLM + Claw Code как tool».
+
+#### Остановить
+
+```bash
+bash dify-stop.sh           # сохраняет данные (Postgres, Weaviate)
+bash dify-stop.sh --purge   # удаляет всё, включая чаты и uploads
 ```
 
 ### Проверка
@@ -207,12 +293,16 @@ flowchart LR
 | **Выключить ядро** | `docker compose -f compose.phoenix.yml -f compose.openwebui.yml -f compose.searxng.yml -f compose.searchbox.yml -f compose.shellbox.yml -f compose.fsbox.yml -f compose.agents-mesh.yml down` |
 | Включить OpenHands GUI | `bash openhands-start.sh` |
 | Выключить OpenHands GUI | `bash openhands-stop.sh` |
-| Включить opencode (без UI) | `bash opencode-start.sh` |
-| Включить opencode + Web UI | `bash opencode-start.sh --web` |
+| Включить opencode (TUI в текущем терминале) | `bash opencode-start.sh` |
+| Включить opencode + Web UI на :3400 (без TUI) | `bash opencode-start.sh --no-attach` (то же — `--web`) |
+| Включить opencode только-контейнер (CI / agent-mesh, без UI вовсе) | `bash opencode-start.sh --no-web` |
 | Выключить opencode | `bash opencode-stop.sh` |
 | Включить Claw Code | `bash clawcode-start.sh` |
 | Выключить Claw Code | `bash clawcode-stop.sh` |
 | Включить host llama.cpp | `bash llamacpp-host-start.sh` (нужен GGUF в `~/.lmstudio/models`) |
+| Включить Dify | `bash dify-start.sh` (нужно ~6 GB pull при первом запуске) |
+| Выключить Dify (volumes сохраняются) | `bash dify-stop.sh` |
+| Выключить Dify + стереть данные | `bash dify-stop.sh --purge` |
 | Включить host Jupyter | `bash jupyter-host-start.sh` |
 | Выключить host Jupyter | `bash jupyter-host-start.sh stop` |
 
@@ -285,15 +375,27 @@ OpenWebUI Admin → Models.
 
 ### 6.3. ASR / TTS / VAD (LocalAI)
 
-`.env.openwebui`:
+`.env.openwebui` (актуальные дефолты — то, что `stack-start.sh`
+автоматически ставит через `ensure_localai_audio`):
+
 ```bash
-OPENWEBUI_AUDIO_STT_MODEL=stt-whisper-cuda-turbo   # alias из LiteLLM
-OPENWEBUI_AUDIO_TTS_MODEL=tts-ru-default
-OPENWEBUI_AUDIO_TTS_VOICE=ono_anna
+OPENWEBUI_AUDIO_STT_MODEL=stt-whisper-large-v3-turbo  # alias в LiteLLM → LocalAI whisper
+OPENWEBUI_AUDIO_TTS_MODEL=tts-piper-ru-fallback       # alias в LiteLLM → LocalAI piper
+OPENWEBUI_AUDIO_TTS_VOICE=alloy                       # для piper voice закодирован в model
+                                                       # name'е, поэтому любое непустое значение OK
 ```
 
-Сами модели LocalAI выбираются в `localai-start.sh → ensure_backends`
-(comment'ы внутри объясняют, какие backend'ы куда мапятся).
+Сами модели LocalAI ставятся:
+
+- автоматически на `bash stack-start.sh` (секция 5b «LocalAI audio
+  bootstrap» в [`stack-start.sh`](stack-start.sh)) — Piper TTS +
+  whisper.cpp под текущую `arch/CUDA`;
+- вручную более широкий набор (qwen-tts, fish-speech, faster-whisper,
+  qwen-asr) в `localai-start.sh → ensure_backends` (comment'ы
+  внутри объясняют, какие backend'ы куда мапятся).
+
+Алиасы и роутинг живут в [`docker/litellm/config.yaml`](docker/litellm/config.yaml)
+(model_list → `stt-whisper-large-v3-turbo`, `tts-piper-ru-fallback`).
 
 ---
 
@@ -315,6 +417,8 @@ OPENWEBUI_AUDIO_TTS_VOICE=ono_anna
 | fsbox | `FSBOX_HOST_PORT` | `8022` |
 | OpenHands GUI | `OPENHANDS_HOST_PORT` | `3300` |
 | opencode Web UI | `OPENCODE_WEB_HOST_PORT` | `3400` |
+| Dify nginx | `DIFY_HOST_PORT` (`.env.dify`) | `8090` (конфликтует с host llama.cpp; см. ниже) |
+| openai-stack-relay | `RELAY_HOST_PORT` | `8089` |
 | clawcode HTTP | `CLAWCODE_HOST_PORT` | `3401` |
 | clawcode-adapter HTTP | `CLAWCODE_ADAPTER_HOST_PORT` | `8790` |
 | openhands-adapter HTTP | `OPENHANDS_ADAPTER_HOST_PORT` | `8791` |

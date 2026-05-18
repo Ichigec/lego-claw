@@ -1,0 +1,50 @@
+# compose.dify.yml — thin override on top of upstream Dify
+# (dify/docker/docker-compose.yaml @ langgenius/dify 1.13.3).
+#
+# What it does:
+#   1. Binds Dify nginx on loopback :8090 (the upstream maps it on
+#      0.0.0.0:80, which collides with anything else listening on :80).
+#   2. Adds Dify api/worker to our llm-stack-net so they can reach
+#      LiteLLM (`http://litellm:4000/v1`) and the agent-mesh adapters
+#      (`http://clawcode-adapter:8790`, `http://openhands-adapter:8791`,
+#      `http://opencode-adapter:8798`) by compose-DNS — exactly the
+#      pattern OpenWebUI uses to register tool servers.
+#   3. Adds host.docker.internal so api/worker can talk to anything
+#      living on the host (LM Studio, llama.cpp, custom callbacks, …).
+#
+# Run from `dify/docker/`:
+#   docker compose -f docker-compose.yaml -f ../../compose.dify.yml up -d
+#
+# Or use the friendlier launcher: `bash dify-start.sh`.
+
+networks:
+  llm-net:
+    external: true
+    name: llm-stack-net
+
+services:
+  nginx:
+    # `!override` replaces the upstream `ports` array entirely, otherwise
+    # docker compose merges and we'd end up listening on both :80 (upstream
+    # default) and :8090 (our addition). Requires Compose v2.20+.
+    ports: !override
+      - "127.0.0.1:${DIFY_HOST_PORT:-8090}:80"
+    networks:
+      - default
+      - llm-net
+
+  api:
+    networks:
+      - ssrf_proxy_network
+      - default
+      - llm-net
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+  worker:
+    networks:
+      - ssrf_proxy_network
+      - default
+      - llm-net
+    extra_hosts:
+      - "host.docker.internal:host-gateway"

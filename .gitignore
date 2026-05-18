@@ -73,7 +73,22 @@ data/openhands/
 data/clawcode/
 
 # ── Vendored upstream / cross-build artefacts (see docs/architecture.md) ────
-dify/
+# Dify (langgenius/dify@1.13.3) is vendored under dify/docker/ — we keep
+# the upstream compose / nginx / ssrf_proxy templates and `.env.example`
+# in git, but skip everything stateful or secret:
+#   - dify/docker/volumes/                  runtime data (Postgres, Weaviate, uploads)
+#   - dify/docker/.env                      pre-rendered upstream secrets
+#                                           (SECRET_KEY, DB_PASSWORD, INIT_PASSWORD, …)
+#   - dify/docker/nginx/conf.d/default.conf nginx-entrypoint envsubst's
+#                                           default.conf.template at start;
+#                                           the rendered `.conf` is not for git.
+#   - dify/docker/nginx/nginx.conf
+#   - dify/docker/nginx/proxy.conf
+dify/docker/volumes/
+dify/docker/.env
+dify/docker/nginx/conf.d/default.conf
+dify/docker/nginx/nginx.conf
+dify/docker/nginx/proxy.conf
 .local/
 diagnostics/phase-a/*.log
 

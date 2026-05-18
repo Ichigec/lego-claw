@@ -1,0 +1,165 @@
+# examples/dify-workflow-agent-mesh.yml — DSL для импорта в Dify Studio.
+#
+# Что это: workflow «Local LLM + наш agent-mesh tool». Юзер пишет
+# задачу, локальный qwen3.6-35b-heretic решает, требуется ли делегировать
+# в Claw Code, и при положительном ответе вызывает Custom Tool
+# `agent-mesh-clawcode` (создаётся через scripts/dify-register-agent-mesh.sh).
+#
+# Импорт:
+#   Dify UI → Studio → Create from DSL → Import → upload этот YAML
+#
+# Версия Dify: 0.6.x DSL spec (langgenius/dify-api 1.13.3). При апгрейде
+# Dify сравните с upstream примером в `dify/api/core/workflow/...`.
+#
+# Зависимости (выполнить ДО импорта):
+#   1. bash dify-start.sh
+#   2. bash scripts/dify-register-litellm.sh
+#   3. bash scripts/dify-register-agent-mesh.sh
+app:
+  description: "Local LLM + Claw Code как tool. Ввод: текстовая задача. Выход: ответ."
+  icon: 🤖
+  icon_background: '#FFEAD5'
+  mode: workflow
+  name: agent-mesh-demo
+  use_icon_as_answer_icon: true
+kind: app
+version: 0.1.0
+
+workflow:
+  graph:
+    edges:
+      - id: start-llm
+        source: start
+        sourceHandle: source
+        target: llm-decide
+        targetHandle: target
+      - id: llm-tool
+        source: llm-decide
+        sourceHandle: source
+        target: clawcode-tool
+        targetHandle: target
+      - id: tool-format
+        source: clawcode-tool
+        sourceHandle: source
+        target: format-result
+        targetHandle: target
+      - id: format-end
+        source: format-result
+        sourceHandle: source
+        target: end
+        targetHandle: target
+
+    nodes:
+      - id: start
+        data:
+          type: start
+          title: Start
+          variables:
+            - variable: user_input
+              type: paragraph
+              label: Задача (опишите свободным текстом)
+              required: true
+              max_length: 4000
+        position: { x: 80, y: 200 }
+
+      - id: llm-decide
+        data:
+          type: llm
+          title: "LLM: should we delegate?"
+          # IMPORTANT: model.name должен совпадать с тем, что вернул
+          # scripts/dify-register-litellm.sh. Если меняли DIFY_LITELLM_DEFAULT_MODEL —
+          # поменяйте здесь же.
+          model:
+            provider: openai_api_compatible
+            name: qwen3.6-35b-heretic
+            mode: chat
+            completion_params:
+              temperature: 0.3
+              max_tokens: 1024
+          prompt_template:
+            - role: system
+              text: |
+                Ты — локальный agent-router. У тебя есть доступ к sub-agent'у
+                Claw Code (Rust CLI), который умеет писать/править код в
+                workspace-каталоге, запускать тесты, читать файлы.
+                Если задача пользователя требует именно этих действий —
+                делегируй её Claw Code (вызывай tool agent-mesh-clawcode →
+                run, передавай поле `prompt`). Иначе отвечай сам.
+                Никогда не делай tool-call дважды подряд (cycle guard,
+                max_nested_agent_calls=1).
+            - role: user
+              text: "{{#start.user_input#}}"
+        position: { x: 380, y: 200 }
+
+      - id: clawcode-tool
+        data:
+          type: tool
+          title: "Tool: clawcode/run"
+          # provider_id должен совпадать с `provider` из
+          # scripts/dify-register-agent-mesh.sh.
+          provider_id: agent-mesh-clawcode
+          provider_name: agent-mesh-clawcode
+          provider_type: api
+          tool_name: run
+          tool_label: "Claw Code: one-shot run"
+          tool_parameters:
+            prompt:
+              type: mixed
+              value: "{{#start.user_input#}}"
+            cwd:
+              type: constant
+              value: "/workspace/project"
+        position: { x: 700, y: 200 }
+
+      - id: format-result
+        data:
+          type: llm
+          title: "LLM: format final answer"
+          model:
+            provider: openai_api_compatible
+            name: qwen3.6-35b-heretic
+            mode: chat
+            completion_params:
+              temperature: 0.2
+              max_tokens: 2048
+          prompt_template:
+            - role: system
+              text: |
+                Ты — финальный форматировщик. На вход — сырой ответ
+                Claw Code (структурированный JSON или текст). Превращай
+                в чистый markdown-ответ для пользователя на русском.
+            - role: user
+              text: |
+                Запрос пользователя:
+                {{#start.user_input#}}
+
+                Сырой ответ Claw Code:
+                {{#clawcode-tool.text#}}
+        position: { x: 1020, y: 200 }
+
+      - id: end
+        data:
+          type: end
+          title: End
+          outputs:
+            - variable: answer
+              value_selector: [format-result, text]
+        position: { x: 1340, y: 200 }
+
+  features:
+    file_upload:
+      enabled: false
+    opening_statement: ''
+    retriever_resource:
+      enabled: false
+    speech_to_text:
+      enabled: false
+    suggested_questions: []
+    suggested_questions_after_answer:
+      enabled: false
+    text_to_speech:
+      enabled: false
+      language: ''
+      voice: ''
+
+  graph_features: {}

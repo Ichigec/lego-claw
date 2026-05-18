@@ -69,6 +69,65 @@ endpoint навешан **bearer-токен** или **HMAC-secret**. Это л�
 
 ---
 
+## Dify секреты (опциональный кубик)
+
+Если поднимаете Dify (`bash dify-start.sh`), у него **отдельный**
+набор секретов — они НЕ входят в общие 11. Хранятся в
+`dify/docker/.env` (а не в основном `.env`), потому что Dify читает
+их через свой собственный compose и docker-entrypoint скрипты.
+
+### Что НЕ коммитить
+
+[`.gitignore`](.gitignore) уже настроен:
+
+```gitignore
+dify/docker/volumes/   # runtime данные (Postgres, Weaviate, uploads, чаты)
+dify/docker/.env       # пользовательский env с заполненными секретами
+```
+
+Vendored upstream-файлы (`docker-compose.yaml`, `nginx/`, `ssrf_proxy/`,
+`.env.example`) — **попадают** в git, чтобы любой коллега мог поднять
+тот же Dify одной командой.
+
+### Ключевые секреты Dify (заполняются при первом запуске)
+
+`bash dify-start.sh` создаёт `dify/docker/.env` из `.env.example` со
+значениями по умолчанию из upstream — то есть **пресидированные**
+ключи, которые НЕ являются вашими личными до тех пор, пока вы
+явно их не сгенерировали:
+
+| Ключ в `dify/docker/.env` | Что защищает | Когда менять |
+| --- | --- | --- |
+| `SECRET_KEY` | Подписывает сессии Dify console + console API tokens. По умолчанию — placeholder из upstream. | Перед выставлением Dify наружу. Сгенерировать: `openssl rand -base64 42` |
+| `DB_PASSWORD` | Локальный Postgres (`db` контейнер). По умолчанию — `difyai123456`. | Только если меняете дефолтный compose-стек на shared-DB |
+| `INIT_PASSWORD` | Защищает endpoint `/install`, через который создаётся первый admin. По умолчанию пустой. | Поставьте сильное значение, если поднимаете Dify на shared-машине: иначе любой первый юзер забронирует admin. |
+| `REDIS_PASSWORD` | Локальный Redis. По умолчанию `difyai123456`. | То же что `DB_PASSWORD`. |
+| `CODE_EXECUTION_API_KEY` | Защищает `sandbox` контейнер (run user-provided code). | Перед выставлением Dify наружу — обязательно. Сгенерировать: `openssl rand -hex 32`. |
+
+### Наш `.env.dify` (отдельный от upstream-секретов)
+
+Файл [`.env.dify`](.env.dify) (gitignored) хранит **наши** настройки —
+порт, console-token, и default-модель. Сам токен генерируется в Dify
+UI и НЕ является долгоживущим секретом по дизайну (отзывается одним
+кликом):
+
+```
+DIFY_CONSOLE_TOKEN=app-xxxxxxxxxxxx   # отзывается в UI → API Keys
+DIFY_LITELLM_API_KEY=sk-local         # дублирует LITELLM_API_KEY из .env
+```
+
+### Что делать перед публикацией
+
+1. `bash scripts/audit-clean.sh` — заодно проверит, нет ли в
+   `dify/docker/.env` или `.env.dify` персональных значений
+   (он смотрит на все `.env*` файлы вне `*.example`).
+2. Если выставляете Dify наружу — поменяйте `SECRET_KEY` и
+   `CODE_EXECUTION_API_KEY` в `dify/docker/.env`.
+3. Не публикуйте логи `docker logs docker-api-1` без редактирования —
+   там могут быть HTTP-headers с DIFY_CONSOLE_TOKEN.
+
+---
+
 ## Ротация одной командой
 
 ### Все 11 ключей сразу (рекомендуется)

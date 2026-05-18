@@ -87,12 +87,20 @@ flowchart LR
 ```bash
 bash stack-start.sh                # обычный стек (litellm + openwebui + …)
 bash opencode-start.sh             # build (если нужно) + start + TUI
-bash opencode-start.sh --no-attach # просто поднять контейнер
-bash opencode-web-start.sh         # опц. Web UI на :3400
+bash opencode-start.sh --no-attach # поднять контейнер + web UI :3400 (TUI пропускается)
+bash opencode-start.sh --web       # alias --no-attach (legacy)
+bash opencode-start.sh --no-web    # ТОЛЬКО контейнер: ни TUI, ни web (CI / agent-mesh)
+bash opencode-web-start.sh         # отдельно поднять web UI :3400 (если контейнер уже жив)
 bash opencode-demo-ru.sh           # readiness + ACP smoke
 bash opencode-demo-ru.sh --adapter # + POST /v1/run через opencode-adapter
 bash opencode-stop.sh              # остановить только opencode
 ```
+
+> **Семантика флагов в [opencode-start.sh](../opencode-start.sh)**:
+> начиная с этой версии `--no-attach` означает «контейнер + web UI без
+> TUI» — это самый частый сценарий. `--web` сохранён как alias.
+> Старое поведение (только контейнер, без UI вообще, нужно для
+> `agent-mesh` и CI) теперь требует явного `--no-web`.
 
 `opencode-start.sh` сам выставляет POSIX-ACL на
 `$OPENCODE_WORKSPACE_DIR` (`${HOME}/agent_dev` по умолчанию) под

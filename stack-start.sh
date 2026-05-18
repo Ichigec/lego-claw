@@ -76,10 +76,16 @@ load_selected_env "$ENV_FILE" \
     LOCALAI_IMAGE \
     CLAWCODE_ADAPTER_API_KEY \
     OPENHANDS_ADAPTER_API_KEY \
+    OPENCODE_ADAPTER_API_KEY \
     CLAWCODE_ADAPTER_HOST_PORT \
     OPENHANDS_ADAPTER_HOST_PORT \
+    OPENCODE_ADAPTER_HOST_PORT \
     CLAWCODE_ADAPTER_GRPC_HOST_PORT \
     OPENHANDS_ADAPTER_GRPC_HOST_PORT \
+    OPENCODE_ADAPTER_GRPC_HOST_PORT \
+    OPENCODE_ADAPTER_CONCURRENCY \
+    OPENCODE_ADAPTER_TIMEOUT \
+    OPENCODE_ADAPTER_AUTO_APPROVE \
     MAX_NESTED_AGENT_CALLS \
     AGENT_MESH_ENABLED \
     AGENT_REGISTRY_API_KEY \
@@ -356,6 +362,9 @@ fi
 
 # ── 3. Phoenix + Postgres + LiteLLM ──────────────────────────────────────────
 say "Запускаю Phoenix + LiteLLM ($COMPOSE_PHOENIX)"
+# Build openai-stack-relay first time (or after relay.py changes). Subsequent
+# `up -d` calls reuse the cached image, so this is cheap.
+docker compose --env-file "$ENV_FILE" -f "$COMPOSE_PHOENIX" build openai-stack-relay >/dev/null 2>&1 || true
 docker compose --env-file "$ENV_FILE" -f "$COMPOSE_PHOENIX" up -d
 
 say "Жду UI Phoenix на :$PHOENIX_HOST_PORT"
@@ -470,6 +479,124 @@ for i in {1..90}; do
     sleep 2
     [ "$i" = 90 ] && die "LocalAI не поднялся за 180s (см. docker logs localai)"
 done
+
+# ── 5b. LocalAI audio bootstrap (Piper TTS + Whisper STT) ───────────────────
+# На свежем localai-data-volume ни backend'ы, ни голоса/веса не установлены,
+# поэтому делаем idempotent ensure через REST API LocalAI: /backends/apply
+# + /models/apply. Здесь ставим МИНИМУМ под алиасы LiteLLM:
+#   * tts-piper-ru-fallback     → backend piper       + voice-ru_RU-irina-medium
+#   * stt-whisper-large-v3-turbo → backend whisper    + ggml-large-v3-turbo.bin
+# Полный набор (qwen-tts, fish-speech, faster-whisper, qwen-asr и пр.) лежит
+# в `localai-start.sh`.
+LOCALAI_BASE="http://localhost:$LOCALAI_HOST_PORT"
+
+# Подбираем правильный whisper backend из галереи под архитектуру/CUDA.
+detect_whisper_backend_id() {
+    local arch cuda_major
+    arch="$(uname -m)"
+    cuda_major="$(nvidia-smi 2>/dev/null | grep -oE 'CUDA Version: [0-9]+' | head -1 | grep -oE '[0-9]+')"
+    cuda_major="${cuda_major:-0}"
+    if [ "$arch" = "aarch64" ]; then
+        if [ "$cuda_major" -ge 13 ]; then
+            echo "cuda13-nvidia-l4t-arm64-whisper"
+        else
+            echo "nvidia-l4t-arm64-whisper"
+        fi
+    else
+        if [ "$cuda_major" -ge 13 ]; then
+            echo "cuda13-whisper"
+        elif [ "$cuda_major" -ge 12 ]; then
+            echo "cuda12-whisper"
+        else
+            echo "cpu-whisper"
+        fi
+    fi
+}
+
+# Ставит backend из галереи (gallery@id или localai@id), если его ещё нет в
+# списке установленных. Принимает: <gallery_id> <runtime_name> [timeout_iters].
+ensure_localai_backend() {
+    local gallery_id="$1" runtime_name="$2" iters="${3:-120}"
+    local installed uuid processed msg
+    installed="$(
+        curl -fsS "$LOCALAI_BASE/backends" 2>/dev/null \
+            | python3 -c 'import json,sys; print(",".join(b.get("Name","") for b in json.load(sys.stdin)))' 2>/dev/null \
+            || echo ""
+    )"
+    if echo ",$installed," | grep -q ",$runtime_name,"; then
+        ok "LocalAI backend $runtime_name уже установлен"
+        return 0
+    fi
+    say "Ставлю LocalAI backend: $runtime_name (gallery: $gallery_id)"
+    uuid="$(curl -fsS -X POST "$LOCALAI_BASE/backends/apply" \
+        -H 'Content-Type: application/json' \
+        -d "{\"id\":\"localai@${gallery_id}\"}" 2>/dev/null \
+        | python3 -c 'import json,sys; print(json.load(sys.stdin).get("id",""))' 2>/dev/null || true)"
+    if [ -z "$uuid" ]; then
+        warn "$runtime_name backend apply вернул пустой id; пропускаю"
+        return 1
+    fi
+    for _ in $(seq 1 "$iters"); do
+        processed="$(curl -fsS "$LOCALAI_BASE/backends/jobs/$uuid" 2>/dev/null \
+            | python3 -c 'import json,sys; print(json.load(sys.stdin).get("processed",False))' 2>/dev/null || echo False)"
+        [ "$processed" = "True" ] && { ok "$runtime_name backend установлен"; return 0; }
+        sleep 3
+    done
+    msg="$(curl -fsS "$LOCALAI_BASE/backends/jobs/$uuid" 2>/dev/null \
+        | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d.get("message","") or d.get("error",""))' 2>/dev/null || echo "")"
+    warn "$runtime_name backend не дождался завершения (последнее: ${msg:0:120}); продолжаю"
+    return 1
+}
+
+# Ставит модель (голос/веса) из галереи, если её ещё нет в /v1/models.
+ensure_localai_model() {
+    local gallery_id="$1" model_name="$2" iters="${3:-60}"
+    local present uuid processed
+    present="$(
+        curl -fsS "$LOCALAI_BASE/v1/models" 2>/dev/null \
+            | python3 -c "import json,sys; ids=[m['id'] for m in json.load(sys.stdin)['data']]; print('yes' if '$model_name' in ids else 'no')" 2>/dev/null \
+            || echo no
+    )"
+    if [ "$present" = "yes" ]; then
+        ok "LocalAI model $model_name уже установлен"
+        return 0
+    fi
+    say "Ставлю LocalAI model: $model_name (gallery: $gallery_id)"
+    uuid="$(curl -fsS -X POST "$LOCALAI_BASE/models/apply" \
+        -H 'Content-Type: application/json' \
+        -d "{\"id\":\"localai@${gallery_id}\"}" 2>/dev/null \
+        | python3 -c 'import json,sys; print(json.load(sys.stdin).get("uuid",""))' 2>/dev/null || true)"
+    if [ -z "$uuid" ]; then
+        warn "$model_name apply вернул пустой uuid; пропускаю"
+        return 1
+    fi
+    for _ in $(seq 1 "$iters"); do
+        processed="$(curl -fsS "$LOCALAI_BASE/models/jobs/$uuid" 2>/dev/null \
+            | python3 -c 'import json,sys; print(json.load(sys.stdin).get("processed",False))' 2>/dev/null || echo False)"
+        [ "$processed" = "True" ] && { ok "$model_name установлен"; return 0; }
+        sleep 2
+    done
+    warn "$model_name не дождался завершения; продолжаю"
+    return 1
+}
+
+ensure_localai_audio() {
+    # Piper (TTS) — быстрый CPU-голос, маленький backend, ставится за секунды.
+    ensure_localai_backend "piper" "piper" 30 || warn "piper backend не поднялся — TTS-piper-ru-fallback может не работать"
+    ensure_localai_model "voice-ru_RU-irina-medium" "voice-ru_RU-irina-medium" 30
+
+    # Whisper (STT) — backend подбираем под arch/CUDA. Образ большой
+    # (1.5–2 GB), поэтому даём много итераций (~10 минут).
+    local whisper_gallery_id
+    whisper_gallery_id="$(detect_whisper_backend_id)"
+    ensure_localai_backend "$whisper_gallery_id" "whisper" 200 \
+        || warn "whisper backend не поднялся — stt-whisper-large-v3-turbo может не работать"
+    # ggml-large-v3-turbo.bin (~1.6 GB) объявлен в docker/localai/models/stt-whisper-large-v3-turbo.yaml
+    # как download_files и подтягивается lazily при первом запросе. Здесь
+    # модель в /v1/models появляется как stt-whisper-large-v3-turbo сразу
+    # после старта LocalAI (через bind-mount), так что отдельный apply не нужен.
+}
+ensure_localai_audio || warn "ensure_localai_audio упал — STT/TTS могут не работать"
 
 if [ "$LOCALAI_ENABLE_QWEN36" = "1" ]; then
     say "Пропускаю удаление qwen3.6-35b-heretic из LocalAI"
@@ -952,6 +1079,29 @@ PY
         sleep 2
         [ "$i" = 60 ] && die "OpenWebUI не поднялся за 120s (см. docker logs open-webui)"
     done
+
+    # ── 6f. Идемпотентная регистрация agent-mesh адаптеров в OpenWebUI ──
+    # OPENWEBUI_TOOL_SERVER_CONNECTIONS (см. §6) проигрывает только при
+    # ПЕРВОЙ загрузке OpenWebUI на свежем openwebui-data-volume. На уже
+    # существующих установках персистентный конфиг побеждает env, и любой
+    # новый адаптер (например, opencode-adapter, добавленный позже двух
+    # других) в выпадающем списке Tools не появится. Скрипт ниже через
+    # /api/v1/configs/tool_servers подтягивает текущий список, гарантирует
+    # что clawcode/openhands/opencode-adapter в нём присутствуют с
+    # АКТУАЛЬНЫМИ ключами из .env (на случай ротации) и записывает обратно.
+    # Идемпотентно: для свежей установки совпадает с тем, что уже посеял
+    # OPENWEBUI_TOOL_SERVER_CONNECTIONS — т.е. no-op.
+    REGISTER_SCRIPT="$SCRIPT_DIR/scripts/openwebui-register-agent-mesh.sh"
+    if [ -x "$REGISTER_SCRIPT" ] || [ -f "$REGISTER_SCRIPT" ]; then
+        if [ -n "${CLAWCODE_ADAPTER_API_KEY:-}" ] && [ -n "${OPENHANDS_ADAPTER_API_KEY:-}" ]; then
+            say "Синхронизирую agent-mesh tool servers в OpenWebUI live-config"
+            if bash "$REGISTER_SCRIPT" >/dev/null 2>&1; then
+                ok "agent-mesh tool servers зарегистрированы в OpenWebUI (clawcode/openhands/opencode)"
+            else
+                warn "openwebui-register-agent-mesh.sh завершился с ошибкой; повторите вручную: bash $REGISTER_SCRIPT"
+            fi
+        fi
+    fi
 else
     warn "OPENWEBUI_ENABLED=0 — пропускаю запуск OpenWebUI"
 fi

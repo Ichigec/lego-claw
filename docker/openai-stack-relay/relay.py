@@ -8,7 +8,6 @@ from __future__ import annotations
 import json
 import os
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from socketserver import ThreadingMixIn
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
@@ -101,7 +100,7 @@ class _Handler(BaseHTTPRequestHandler):
         self.wfile.write(out)
 
 
-class _Server(ThreadingMixIn, ThreadingHTTPServer):
+class _Server(ThreadingHTTPServer):
     daemon_threads = True
 
 

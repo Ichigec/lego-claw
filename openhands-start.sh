@@ -157,6 +157,39 @@ fi
 mkdir -p "$OPENHANDS_WORKSPACE_DIR"
 mkdir -p "$OPENHANDS_STATE_DIR"
 
+# ── 5.1. Pre-seed settings.json so the UI doesn't show the API-key modal ───
+# OpenHands shows a "configure your LLM" onboarding modal whenever
+# ~/.openhands/settings.json is missing — even when the env vars in
+# compose.openhands.yml already point at our LiteLLM. Seed a minimal file
+# the first time so `bash openhands-start.sh` lands the user straight in
+# a usable chat. We never overwrite an existing settings.json: that file
+# may already contain user-tweaked values (provider, advanced flags, …).
+_OH_SETTINGS_FILE="$OPENHANDS_STATE_DIR/settings.json"
+if [ ! -f "$_OH_SETTINGS_FILE" ]; then
+    # NOTE: OpenHands sandboxes can't resolve the compose-DNS name `litellm`
+    # (they live on the default bridge), so we always pre-seed
+    # `host.docker.internal:$LITELLM_HOST_PORT` here rather than the
+    # in-cluster URL — same trick as compose.openhands.yml. Set
+    # OPENHANDS_LITELLM_BASE_URL in .env.openhands to override.
+    _oh_seed_base_url="${OPENHANDS_LITELLM_BASE_URL}"
+    case "$_oh_seed_base_url" in
+        *litellm:*) _oh_seed_base_url="http://host.docker.internal:${LITELLM_HOST_PORT}/v1" ;;
+        '') _oh_seed_base_url="http://host.docker.internal:${LITELLM_HOST_PORT}/v1" ;;
+    esac
+    cat >"$_OH_SETTINGS_FILE" <<JSON
+{
+  "llm_model": "litellm_proxy/${OPENHANDS_DEFAULT_MODEL}",
+  "llm_base_url": "${_oh_seed_base_url}",
+  "llm_api_key": "${OPENHANDS_LITELLM_API_KEY}",
+  "agent": "CodeActAgent",
+  "language": "ru",
+  "confirmation_mode": false
+}
+JSON
+    chmod 600 "$_OH_SETTINGS_FILE" 2>/dev/null || true
+    echo "→ Pre-seeded $_OH_SETTINGS_FILE (skip API-key onboarding modal)"
+fi
+
 # ── 5.5. Workspace ACL ─────────────────────────────────────────────────────
 # The agent-server runtime image runs as the non-root user `openhands`
 # (uid 10001 in agent-server:1.15.0-python — verify with `docker exec

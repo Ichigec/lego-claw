@@ -118,6 +118,11 @@ services:
       - UPSTREAM_API_KEY=${LITELLM_API_KEY:-sk-local}
       - UPSTREAM_MODEL=qwen3.6-35b-heretic
       - LISTEN_PORT=8088
+    ports:
+      # Loopback only. Host port moved 8088 → 8089 to avoid clashing with
+      # host-side llama.cpp (which historically uses :8088). The container
+      # still listens internally on :8088.
+      - "127.0.0.1:${RELAY_HOST_PORT:-8089}:8088"
     networks: [llm-net]
 
   # Note: the old `clawcode-litellm-adapter` placeholder service AND the

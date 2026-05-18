@@ -32,7 +32,7 @@ Runtime-песочницы OpenHands сидят на **default bridge** и **н�
 (`openai-stack-relay`) и два полноценных агент-адаптера в отдельном
 `compose.agents-mesh.yml`:
 
-1. **`openai-stack-relay`** — тонкий OpenAI-совместимый HTTP-слой: LiteLLM → relay → LiteLLM с фиксированным `model` (`UPSTREAM_MODEL`). Зарегистрированный алиас: **`stack-openai-relay-qwen36`**. Нужен как шаблон для будущих прокси (оркестратор, очередь, внешний HTTP) без цикла на том же `model_name`.
+1. **`openai-stack-relay`** — тонкий OpenAI-совместимый HTTP-слой: LiteLLM → relay → LiteLLM с фиксированным `model` (`UPSTREAM_MODEL`). Зарегистрированный алиас: **`stack-openai-relay-qwen36`**. Нужен как шаблон для будущих прокси (оркестратор, очередь, внешний HTTP) без цикла на том же `model_name`. Loopback host port: `127.0.0.1:${RELAY_HOST_PORT:-8089}` (контейнер по-прежнему слушает `:8088` внутри сети `llm-stack-net`; маппинг сдвинут с `:8088` на `:8089`, чтобы не конфликтовать с host-side llama.cpp).
 2. **`clawcode-adapter`** и **`openhands-adapter`** — реальные headless-фронты Claw Code и OpenHands. Поднимаются [`compose.agents-mesh.yml`](../compose.agents-mesh.yml) (см. [`docs/agent-mesh.md`](agent-mesh.md)). Соответствующие LiteLLM-алиасы — `agent/clawcode` и `agent/openhands` — заведены в [`docker/litellm/config.yaml`](../docker/litellm/config.yaml). Старая заглушка `clawcode-cli-routing-stub` и сервис `clawcode-litellm-adapter` удалены: всё реальное теперь делает adapter из agent-mesh.
 
 ### Track 2: A2A Agent Gateway

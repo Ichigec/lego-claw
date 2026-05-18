@@ -55,7 +55,16 @@ flowchart TB
         OpencodeCtr["opencode container<br/>(+ Web UI :3400)"]
     end
 
+    subgraph optui ["Опциональные UI"]
+        Dify["Dify nginx :8090<br/>(visual workflow builder)"]
+    end
+
     Browser --> OpenWebUI
+    Browser --> Dify
+    Dify -->|OpenAI /v1| LiteLLM
+    Dify -.->|Custom Tool OpenAPI| ClawAdapter
+    Dify -.->|Custom Tool OpenAPI| OpenHandsAdapter
+    Dify -.->|Custom Tool OpenAPI| OpencodeAdapter
     OpenWebUI -->|OpenAI /v1| LiteLLM
     LiteLLM -->|OTLP| Phoenix
     LiteLLM --> LocalAI
@@ -82,6 +91,7 @@ flowchart TB
 | Кубик | Compose / Launcher | Порт | За что отвечает |
 | --- | --- | --- | --- |
 | **OpenWebUI** | `compose.openwebui.yml` | :3000 | Главный чат-UI, регистрация tool-серверов, RBAC |
+| **Dify (опц.)** | `compose.dify.yml` + `dify-start.sh` | :8090 | Visual no-code workflow builder; LiteLLM как provider, agent-mesh как Custom Tools |
 | **LiteLLM** | `compose.openwebui.yml` (включает litellm) | :4000 | OpenAI-шлюз для всех клиентов: модели, fallback'и, токен-учёт |
 | **Phoenix** | `compose.phoenix.yml` | :6006 | OTLP-трейсы LiteLLM + аналитика стоимости |
 | **LocalAI** | `compose.localai.yml` | :8180 | ASR / TTS / embeddings под GPU (опц.) |
@@ -208,10 +218,17 @@ audio loop, Phoenix `/health`, OpenHands `:3300/`).
 ```bash
 bash openhands-start.sh             # OpenHands GUI :3300
 bash clawcode-start.sh              # Claw Code (Rust CLI), интерактивный exec
-bash opencode-start.sh              # opencode (idle TUI-container + ACP-bridge готов)
-bash opencode-start.sh --web        # opencode container + web UI :3400 одной командой
-bash opencode-web-start.sh          # опц. opencode web UI :3400 (если контейнер уже запущен)
+bash opencode-start.sh              # opencode: интерактивный TUI в текущем терминале
+bash opencode-start.sh --no-attach  # opencode: контейнер + web UI :3400 (TUI пропускается)
+bash opencode-start.sh --web        # alias --no-attach (legacy флаг)
+bash opencode-start.sh --no-web     # opencode только-контейнер: ни TUI, ни web
+                                    # (CI / agent-mesh: opencode-adapter ходит через docker exec)
+bash opencode-web-start.sh          # опц. поднять web UI :3400 (если контейнер уже запущен)
+bash dify-start.sh                  # Dify visual workflow builder :8090
 bash llamacpp-host-start.sh         # host llama.cpp :8090 (если у вас GGUF-модель)
+                                    # Внимание: оба используют :8090 по умолчанию.
+                                    # Поднимаете оба — задайте DIFY_HOST_PORT=8095
+                                    # в .env.dify ИЛИ LLAMA_CPP_HOST_PORT=8091 в .env.llamacpp.
 bash jupyter-host-start.sh          # host-side Jupyter (Code Interpreter)
 ```
 
@@ -281,15 +298,25 @@ runtime-данные. Возвращает exit code != 0 если что-то �
 ```
 .
 ├── compose.*.yml         # docker-compose стеки (по одному на сервис)
+│   └── compose.dify.yml  # override: Dify nginx :8090 + llm-stack-net
 ├── .env*.example         # публичные шаблоны (.env*  — gitignored)
+│   └── .env.dify.example # console-token + порт + LiteLLM-алиас для Dify
 ├── *-start.sh            # launcher-скрипты (идемпотентные)
-├── *-stop.sh             # парные stop-скрипты
+│   └── dify-start.sh     # vendored upstream + наш override
+├── *-stop.sh             # парные stop-скрипты (dify-stop.sh поддерживает --purge)
 ├── *-demo-ru.sh          # демо/smoke сценарии (русские)
+├── dify/                 # vendored langgenius/dify@1.13.3
+│   └── docker/           # upstream compose + nginx/ssrf_proxy templates
+│                         # (volumes/, .env — gitignored)
+├── examples/
+│   └── dify-workflow-agent-mesh.yml   # DSL для импорта в Dify Studio
 ├── docker/               # Dockerfile'ы и конфиги
 │   ├── litellm/          # config.yaml LiteLLM (модели, fallback'и)
+│   ├── openai-stack-relay/ # тонкий OpenAI-relay (Pattern-B демо), :8089
 │   ├── opencode/         # ACP-bridge image
 │   ├── openhands-adapter/ # HTTP-адаптер вокруг openhands runtime
 │   ├── clawcode-adapter/  # HTTP-адаптер вокруг Claw Code
+│   ├── opencode-adapter/  # HTTP-адаптер вокруг opencode (ACP)
 │   ├── agent-mesh-common/ # общий ACP / health-check код
 │   ├── searchbox/         # 15-engine search server
 │   ├── shellbox/          # whitelisted shell MCP
@@ -309,10 +336,14 @@ runtime-данные. Возвращает exit code != 0 если что-то �
 │   ├── openwebui-tools.md
 │   ├── litellm-clients.md
 │   ├── llama-cpp-host.md
+│   ├── dify.md
 │   └── sherpa-lmstudio.md
 ├── mcp/                  # multi-engine MCP search server (15 движков)
 ├── models/               # Sherpa-ONNX ASR-модель (опц., 318 MB)
 ├── scripts/              # host-side helper'ы + lib/env-expand.sh
+│   ├── audit-clean.sh                # pre-publish аудит секретов / путей
+│   ├── dify-register-litellm.sh      # auto-регистрация LiteLLM как provider
+│   └── dify-register-agent-mesh.sh   # auto-регистрация 3 адаптеров как Tools
 └── data/                 # runtime: backups, debug, diagnostics, trajectories
                           # (содержимое в .gitignore)
 ```
@@ -374,6 +405,9 @@ docker compose -f compose.openwebui.yml down -v
 
 - **[`INSTALL.md`](INSTALL.md)** — полная установка от чистой ОС +
   карта всех тумблеров «как включить / выключить любой кубик».
+- **[`login.md`](login.md)** — где и как логиниться во все приложения
+  (OpenWebUI, LiteLLM Admin, Phoenix, OpenHands, opencode, Dify,
+  Jupyter), какие токены откуда брать.
 - **[`SECURITY.md`](SECURITY.md)** — все 11 временных ключей, как их
   ротировать, чего НЕ делать с git.
 - [`docs/architecture.md`](docs/architecture.md) — общая архитектура,
@@ -388,6 +422,8 @@ docker compose -f compose.openwebui.yml down -v
   MCP, host.docker.internal трюки.
 - [`docs/opencode.md`](docs/opencode.md) — opencode: ACP-канал,
   Web UI, контейнерная архитектура.
+- [`docs/dify.md`](docs/dify.md) — Dify: visual workflow builder, ACP/A2A
+  через Custom Tools, troubleshooting (sandbox/plugin_daemon/миграции).
 - [`docs/litellm-clients.md`](docs/litellm-clients.md) — как три
   UI-клиента (OpenWebUI / OpenHands / Claw / opencode) ходят через
   единый LiteLLM.

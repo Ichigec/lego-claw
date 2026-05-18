@@ -125,6 +125,18 @@ _oc_web_running() {
     return 1
 }
 
+_oc_pick_log_path() {
+    # /.opencode bind-mount'ится с хост-юзера (pavel:docker), поэтому
+    # opencode (uid 10102) сможет туда писать только если на хосте применён
+    # setfacl (см. opencode-start.sh §5.5). Если не сможем — фолбек на /tmp,
+    # которая всегда world-writable.
+    if docker exec opencode bash -c 'touch /.opencode/web.log 2>/dev/null && [ -w /.opencode/web.log ]'; then
+        printf '%s' '/.opencode/web.log'
+    else
+        printf '%s' '/tmp/opencode-web.log'
+    fi
+}
+
 start_web() {
     if _oc_web_running; then
         warn "opencode web уже работает — не запускаю повторно. Используйте --restart."
@@ -138,16 +150,23 @@ start_web() {
     fi
     ok "Бинарь opencode внутри контейнера: $oc_bin"
 
+    local log_path
+    log_path="$(_oc_pick_log_path)"
+    if [ "$log_path" = "/tmp/opencode-web.log" ]; then
+        warn "/.opencode не writable для opencode (uid 10102). Лог пишу в $log_path внутри контейнера."
+        warn "Чтобы исправить: bash opencode-stop.sh && bash opencode-start.sh (новый opencode-start.sh применит setfacl на state-dir)."
+    fi
+
     # Усекаем лог, чтобы tail при ошибке показывал ТОЛЬКО текущий запуск,
     # а не накопившийся мусор от прошлых неудачных попыток.
-    docker exec opencode bash -c ': > /.opencode/web.log' 2>/dev/null || true
+    docker exec opencode bash -c ": > '$log_path'" 2>/dev/null || true
 
     # `-d` detaches inside the container так, чтобы шелл не висел на демоне.
     # Без `-l` намеренно: login-shell в Debian пере-исходит /etc/profile и
     # сбрасывает PATH, выкидывая ~/.local/bin (куда installer кладёт opencode).
     # Поэтому вызываем opencode по абсолютному пути.
     # Порт 4096 — дефолт opencode web (см. `opencode web --help`).
-    docker exec -d opencode bash -c "cd /workspace/project && exec '$oc_bin' web --hostname 0.0.0.0 --port 4096 >>/.opencode/web.log 2>&1"
+    docker exec -d opencode bash -c "cd /workspace/project && exec '$oc_bin' web --hostname 0.0.0.0 --port 4096 >>'$log_path' 2>&1"
 
     # opencode web/serve поднимается ~1-3с в первый раз. Активно ждём
     # до 15 секунд, проверяя curl'ом изнутри контейнера.
@@ -155,12 +174,13 @@ start_web() {
         sleep 1
         if _oc_web_running; then
             ok "opencode web запущен (бинарь: $oc_bin; внутри: :4096, хост: 127.0.0.1:$OPENCODE_WEB_HOST_PORT, за ${i}s)"
+            ok "Лог: docker exec opencode tail -f $log_path"
             return
         fi
     done
 
-    tail_log="$(docker exec opencode tail -n 30 /.opencode/web.log 2>/dev/null || true)"
-    die "opencode web не стартовал за 15s. Последние строки лога:\n$tail_log"
+    tail_log="$(docker exec opencode tail -n 30 "$log_path" 2>/dev/null || true)"
+    die "opencode web не стартовал за 15s. Лог: $log_path. Последние строки:\n$tail_log"
 }
 
 case "$ACTION" in
@@ -172,6 +192,5 @@ esac
 if [ "$ACTION" != "stop" ]; then
     echo
     echo "URL:        http://127.0.0.1:$OPENCODE_WEB_HOST_PORT"
-    echo "Логи:       docker exec opencode tail -f /.opencode/web.log"
     echo "Остановить: bash $0 --stop"
 fi

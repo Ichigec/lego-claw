@@ -121,6 +121,11 @@ done
 check "runtime dirs only contain .gitkeep/README.md" "$(printf '%b' "$found")"
 
 # ── 5. Артефакты, которые должны быть удалены целиком ───────────────────────
+# Если каталог из forbidden существует И содержит хотя бы один обычный файл,
+# валим аудит. Если каталог в .gitignore И пустой / содержит только пустые
+# поддиректории — это безвредный runtime-leftover (например пустой
+# `librechat/data-node` от давно удалённого compose-volume), git его не
+# трогает; такое подсвечиваем как warn-only.
 echo "5. Удалённые каталоги, которые не должны существовать:"
 forbidden=(
     "librechat"
@@ -130,12 +135,21 @@ forbidden=(
     ".venv-sherpa"
 )
 found=""
+warn_leftover=""
 for d in "${forbidden[@]}"; do
-    if [ -e "$d" ]; then
-        found="$found  существует: $d\n"
+    [ -e "$d" ] || continue
+    if [ -d "$d" ] && [ -z "$(find "$d" -type f 2>/dev/null | head -1)" ] \
+            && git check-ignore -q "$d" 2>/dev/null; then
+        warn_leftover="$warn_leftover  $d (пустой gitignored leftover)\n"
+        continue
     fi
+    found="$found  существует: $d\n"
 done
 check "no removed directories present" "$(printf '%b' "$found")"
+if [ -n "$warn_leftover" ]; then
+    printf "  %s!%s warn: пустые leftover-каталоги (gitignored, не пушатся, но удалите вручную):\n" "$YEL" "$RST"
+    printf '%b' "$warn_leftover" | sed 's|^|    |'
+fi
 
 # ── 6. .env* файлы не трекаются git'ом (только .env*.example) ───────────────
 echo "6. .env* (без .example) не должны быть в git:"
@@ -146,6 +160,47 @@ check "no .env* (non-example) files tracked by git" "$found"
 echo "7. Бинарные артефакты в корне репо (не в моделях):"
 found="$(find . -maxdepth 1 -type f \( -iname '*.png' -o -iname '*.wav' -o -iname '*.mp3' \) 2>/dev/null)"
 check "no PNG/WAV/MP3 in repo root" "$found"
+
+# ── 8. Неизвестные контейнеры в llm-stack-net (warn-only) ───────────────────
+# Если в нашей docker-сети висят контейнеры, которых нет в compose-файлах
+# репо, это либо чужой стек (voice-assistant, gpu-tts, whisper-stt, …),
+# либо забытые runtime-sandbox'ы OpenHands (oh-agent-server-…), либо
+# Dify-сервисы (включаются опционально). Не валим аудит — просто
+# подсвечиваем, чтобы пользователь сам решил.
+echo "8. Неизвестные контейнеры в сети llm-stack-net (warn-only):"
+if command -v docker >/dev/null 2>&1 \
+        && docker network inspect llm-stack-net >/dev/null 2>&1; then
+    # Список «наших» имён контейнеров — то, что объявляют compose.*.yml
+    # (container_name) + типовые префиксы (oh-agent-server-* спавнится
+    # OpenHands runtime-ом, dify-* — vendored Dify compose).
+    known_re='^(phoenix|phoenix-db|litellm|litellm-db|openai-stack-relay'
+    known_re+='|open-webui|searxng|searchbox|shellbox|fsbox|localai'
+    known_re+='|llama-server|clawcode|clawcode-adapter'
+    known_re+='|openhands|openhands-adapter|opencode|opencode-adapter'
+    known_re+='|agent-registry|skills-manager'
+    known_re+='|oh-agent-server-.*'
+    known_re+='|docker-api-1|docker-worker-1|docker-web-1|docker-nginx-1'
+    known_re+='|docker-redis-1|docker-db-1|docker-weaviate-1|docker-sandbox-1'
+    known_re+='|docker-ssrf_proxy-1|docker-plugin_daemon-1)$'
+    unknown="$(
+        docker network inspect llm-stack-net \
+            --format '{{range $i, $c := .Containers}}{{$c.Name}}
+{{end}}' 2>/dev/null \
+            | grep -v '^$' \
+            | grep -vE "$known_re" \
+            | head -10
+    )"
+    if [ -n "$unknown" ]; then
+        printf "  %s!%s неизвестные контейнеры в llm-stack-net:\n" "$YEL" "$RST"
+        printf "%s\n" "$unknown" | sed 's|^|      |'
+        printf "      %s(warn-only — это либо чужой стек,%s\n" "$YEL" "$RST"
+        printf "      %s либо забытый runtime-sandbox; не учитывается в exit code)%s\n" "$YEL" "$RST"
+    else
+        printf "  %s✓%s only known containers in llm-stack-net\n" "$GRN" "$RST"
+    fi
+else
+    printf "  %s-%s skipped (docker недоступен или сеть llm-stack-net не существует)\n" "$YEL" "$RST"
+fi
 
 echo
 if [ "$problems" -eq 0 ]; then
