@@ -48,7 +48,7 @@ echo
 # jovyan, node, root) — это in-container HOME-пути из Dockerfile'ов;
 # к персональным данным пользователя репо не относятся, поэтому исключаем.
 echo "1. Персональные /home/<user>/ пути:"
-container_users='agent|searcher|runner|openhands|opencode|clawcode|jovyan|node|root|app|user'
+container_users='agent|searcher|runner|openhands|opencode|clawcode|jovyan|node|root|app|user|vastbase'
 found="$( {
     git ls-files | while IFS= read -r f; do
         [ -f "$f" ] || continue
@@ -56,6 +56,7 @@ found="$( {
             *.env|*.env.*) continue ;;
             scripts/audit-clean.sh) continue ;;
             README.md) continue ;;
+            dify/docker/*) continue ;;   # vendored upstream Dify compose
         esac
         grep -nE '/home/[a-z][a-z0-9_-]+' "$f" 2>/dev/null \
             | grep -vE "/home/($container_users)(/|\$|[^a-z0-9_-])" \
@@ -90,6 +91,7 @@ found="$( {
             docker/searxng/settings.yml) continue ;;  # содержит admin@admin.com из upstream
             mcp/openhands_mcp.json) continue ;;
             docs/*.md) continue ;;  # допустимы примеры user@example.com
+            dify/docker/*) continue ;;  # vendored upstream Dify (hello@dify.ai и т.п.)
         esac
         grep -nE '[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}' "$f" 2>/dev/null \
             | grep -viE 'example\.(com|org|net)|noreply|admin@admin|@github|@litellm' \
@@ -181,7 +183,11 @@ if command -v docker >/dev/null 2>&1 \
     known_re+='|oh-agent-server-.*'
     known_re+='|docker-api-1|docker-worker-1|docker-web-1|docker-nginx-1'
     known_re+='|docker-redis-1|docker-db-1|docker-weaviate-1|docker-sandbox-1'
-    known_re+='|docker-ssrf_proxy-1|docker-plugin_daemon-1)$'
+    known_re+='|docker-ssrf_proxy-1|docker-plugin_daemon-1'
+    known_re+='|dify-api-1|dify-worker-1|dify-web-1|dify-nginx-1'
+    known_re+='|dify-redis-1|dify-db-1|dify-weaviate-1|dify-sandbox-1'
+    known_re+='|dify-ssrf_proxy-1|dify-plugin_daemon-1'
+    known_re+='|searxng-redis)$'
     unknown="$(
         docker network inspect llm-stack-net \
             --format '{{range $i, $c := .Containers}}{{$c.Name}}

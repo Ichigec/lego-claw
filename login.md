@@ -296,7 +296,7 @@ adapter'а (типичный случай: ротировали `.env`, не п�
 значения в выводе:
 
 ```bash
-cd /home/pavel/cursor/first
+cd "$(git rev-parse --show-toplevel)"   # перейти в корень репо
 
 # Все логины UI одной командой
 echo "OpenWebUI admin = ${OPENWEBUI_ADMIN_EMAIL:-(см. форму при входе)}"
